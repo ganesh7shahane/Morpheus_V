@@ -4,11 +4,16 @@ A cheminformatics tool for bioisosteric and R-group replacement, built with Reac
 
 **Features:**
 - Molecule fragmentation & 2D/3D visualisation
-- Fragment-based search & replace with real-time progress (SSE)
-- Generated molecule grid with parallel-coordinates filter, sorting, and pagination
-- Shape + ESP similarity scoring via espsim
+- Interactive molecule drawing via embedded Ketcher editor
+- Fragment-based search & replace with real-time per-molecule progress (SSE streaming)
+- Tiered fragment libraries (Very Common → Singletons, sourced from ChEMBL bioactive molecules)
+- Structural alert screening — generated molecules are flagged / rejected based on SMARTS filters
+- Generated molecule grid with parallel-coordinates filter, sorting, pagination, and substructure filter (include/exclude)
+- Export generated molecules to CSV, SMILES (.smi), or SDF
+- Shape + ESP similarity scoring via espsim (per-molecule streaming progress)
 - Protein-Ligand alignment with Mol* 3D viewer
 - Retrosynthetic planning via MCTS (requires optional `synplanner` conda env)
+- Dark / light mode toggle
 
 ---
 
@@ -89,10 +94,29 @@ Once set up, clicking **"Run Retrosynthetic Planning"** auto-starts the secondar
 | File | Size | Tracked in git |
 |---|---|---|
 | `data/building_blocks_em_sa_ln_with_ids.sdf.gz` | 25 MB | yes |
-| `data/fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz` | 5 MB | yes |
+| `data/fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz` | ~5 MB | yes — "Entire ChEMBL" library |
+| `data/VeryCommon.txt.gz` … `data/Singletons.txt.gz` | varies | optional — place in `data/` to unlock tiered libraries |
 | `data/*.sdf` (uncompressed, 276 MB) | 276 MB | no — too large |
 | `data/*.pickle` (derived cache) | ~30 MB | no — auto-generated |
 | `synplan_data/` (model weights) | ~2 GB | no — download separately |
+
+### Tiered fragment libraries
+
+The Search & Replace section exposes up to 10 frequency-stratified libraries derived from ChEMBL bioactive molecules.
+Only the "Entire ChEMBL" file is bundled by default.
+Place any of the following files in `data/` and they will be auto-detected at startup:
+
+| File | Description |
+|---|---|
+| `VeryCommon.txt.gz` | ≥ 725 occurrences — 325 fragments, highest drug-likeness confidence |
+| `Common.txt.gz` | 215–724 occurrences — 750 fragments |
+| `LessCommon.txt.gz` | 65–214 occurrences — 1 863 fragments |
+| `Rare.txt.gz` | 25–64 occurrences — 3 633 fragments |
+| `VeryRare.txt.gz` | 9–24 occurrences — 8 164 fragments |
+| `ExtremelyRare.txt.gz` | 5–8 occurrences — 8 067 fragments |
+| `UltraRare.txt.gz` | 3–4 occurrences — 11 111 fragments |
+| `Doubletons.txt.gz` | exactly 2 occurrences |
+| `Singletons.txt.gz` | exactly 1 occurrence — maximum novelty |
 
 ---
 
@@ -118,7 +142,9 @@ npm run dev
 | `Could not find Python 3.10+` | Install Python via `brew install python` or `conda install python=3.12` |
 | Install fails / broken venv | Delete `backend/.venv`, then re-run `npm run dev` |
 | `ModuleNotFoundError` after install | Delete `backend/.venv` and `backend/.venv/.deps_ok`, then re-run |
+| `[Errno 48] Address already in use` on port 8000 | The script now auto-kills stale processes; if it still fails, run `lsof -ti :8000 \| xargs kill -9` manually |
 | Retrosynthesis spins / "planner service" error | Check backend console for `WARNING: Could not locate synplanner Python` and set `SYNPLANNER_PYTHON` |
 | First retrosynthesis call times out | Normal — building block loading takes 3–5 min on first run |
 | `data/*.sdf` missing after clone | Expected — the 276 MB file is gitignored; the backend uses the `.sdf.gz` directly |
+| Tiered fragment libraries not visible | Place the corresponding `*.txt.gz` files in `data/` — see Tiered fragment libraries table above |
 
