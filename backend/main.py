@@ -12,8 +12,8 @@ from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from rdkit import Chem
 from rdkit.Chem import Descriptors, Crippen, QED, rdDepictor, Draw, AllChem, rdDistGeom, rdFingerprintGenerator, DataStructs, rdMolDescriptors, rdFMCS, rdDetermineBonds
-from rdkit.Chem import RDConfig as _RDConfig
-sys.path.append(os.path.join(_RDConfig.RDContribDir, 'SA_Score'))
+# Local patched copy of sascorer — uses the modern rdFingerprintGenerator API
+# to avoid the RDKit deprecation warning "please use MorganGenerator".
 import sascorer as _sascorer
 
 try:
