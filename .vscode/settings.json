@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "npm install": true,
+        "pip": true,
+        "conda": true,
+        "/Users/ganeshshahane/miniconda3/bin/python": true
+    }
+}

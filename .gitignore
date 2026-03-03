@@ -1,0 +1,39 @@
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+dist/
+.vite/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+backend/.venv/
+backend/.venv/.deps_ok
+*.egg-info/
+
+# ── Environment / secrets ────────────────────────────────────────────────────
+.env
+backend/.env
+*.env.local
+
+# ── Large / derived data files ───────────────────────────────────────────────
+# Keep:  data/*.sdf.gz   (25 MB building blocks, required)
+#        data/*.txt.gz   (5 MB fragment library, required)
+# Exclude: raw .sdf (276 MB — exceeds GitHub 100 MB hard limit)
+#          .pickle  (derived cache, regenerated automatically on first run)
+data/*.sdf
+data/*.pickle
+
+# synplan_data contains 2 GB of model checkpoints — distribute separately
+synplan_data/
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+**/.DS_Store
+
+# ── Editor ───────────────────────────────────────────────────────────────────
+.idea/
+*.swp
+*.swo

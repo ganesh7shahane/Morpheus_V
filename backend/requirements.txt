@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+# rdkit handled separately by start_backend.sh (tries rdkit then rdkit-pypi)
+rdkit
+Pillow
+requests
+# Shape + ESP similarity
+espsim
+scipy
+scikit-learn
+numpy>=1.23.5,<2.3
