@@ -25,8 +25,9 @@ from itertools import count, islice
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -575,7 +576,7 @@ def plan_synthesis(
             "num_iterations": int(_iters) if _iters is not None else None,
             "target_smiles": smiles,
         }
-    except Exception as e:
+    except BaseException as e:  # noqa: BLE001 – catch SystemExit, MemoryError, etc.
         traceback.print_exc()
         return {"success": False, "solved": False, "routes": [], "error": str(e)}
 
@@ -593,6 +594,26 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(Exception)
+async def _json_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all: always return JSON so the proxy never sees a raw HTML 500.
+
+    NOTE: Starlette requires the type to be a subclass of Exception, not
+    BaseException, so we register only Exception here.  The endpoint-level
+    handlers use `except BaseException` to cover SystemExit / MemoryError.
+    """
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "success": False,
+            "solved": False,
+            "routes": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        },
+    )
+
+
 @app.on_event("startup")
 def _startup_init():
     """Begin loading building blocks + models in a background thread so the
@@ -605,8 +626,9 @@ def _startup_init():
             ok = initialize()
             if not ok:
                 _init_error = "initialize() returned False"
-        except Exception as exc:
-            _init_error = str(exc)
+        except BaseException as exc:  # noqa: BLE001
+            _init_error = f"{type(exc).__name__}: {exc}"
+            traceback.print_exc()
         finally:
             _initializing = False
 
@@ -643,15 +665,32 @@ def api_plan_synthesis(req: PlanRequest):
             max_iterations=req.max_iterations,
             min_mol_size=req.min_mol_size,
         )
-        # Ensure nothing non-serializable slips through
-        import json as _json
-        _json.dumps(result)  # validate before returning
+        # Validate JSON serializability before FastAPI touches the object.
+        # Use jsonable_encoder which handles numpy/pydantic types the same
+        # way FastAPI does, guaranteeing no serialization surprise downstream.
+        try:
+            from fastapi.encoders import jsonable_encoder as _enc
+            import json as _json
+            _json.dumps(_enc(result))
+        except Exception as _se:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "success": False,
+                    "solved": False,
+                    "routes": [],
+                    "error": f"Result contained non-serializable data: {_se}",
+                },
+            )
         return result
-    except Exception as _exc:
+    except BaseException as _exc:  # noqa: BLE001 – catch SystemExit, MemoryError, etc.
         traceback.print_exc()
-        return {
-            "success": False,
-            "solved": False,
-            "routes": [],
-            "error": str(_exc),
-        }
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": False,
+                "solved": False,
+                "routes": [],
+                "error": f"{type(_exc).__name__}: {_exc}",
+            },
+        )

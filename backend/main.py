@@ -120,6 +120,28 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _eager_start_synth_planner() -> None:
+    """Kick off synth_planner startup in the background as soon as the main
+    backend starts, so building blocks are already loaded (or loading) by the
+    time the user clicks 'Run Retrosynthetic Planning'."""
+    def _bg() -> None:
+        try:
+            if _start_synth_planner():
+                print("[main] synth_planner service started; waiting for init…")
+                ok, err = _wait_for_synth_init(timeout=600)
+                if ok:
+                    print("[main] synth_planner fully initialised and ready.")
+                else:
+                    print(f"[main] synth_planner init failed: {err}")
+            else:
+                print("[main] synth_planner could not be started (synplanner env may be missing).")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[main] synth_planner eager-start error: {exc}")
+
+    threading.Thread(target=_bg, daemon=True, name="synth_planner_eager_start").start()
+
+
 # ---------- request / response models ----------
 
 class SmilesRequest(BaseModel):
@@ -1128,14 +1150,27 @@ def _start_synth_planner() -> bool:
         return False
 
 
-def _wait_for_synth_init(timeout: int = 600) -> bool:
-    """Poll health until building blocks are loaded (up to *timeout* seconds)."""
+def _wait_for_synth_init(timeout: int = 600) -> tuple[bool, str]:
+    """Poll health until building blocks are loaded (up to *timeout* seconds).
+
+    Returns (True, "") on success, or (False, error_message) on failure / timeout.
+    Fails immediately if the planner reports an init_error instead of waiting.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if _is_synth_planner_initialized():
-            return True
+        try:
+            r = _requests.get(f"{SYNTH_PLANNER_URL}/health", timeout=3)
+            health = r.json()
+            if health.get("initialized", False):
+                return True, ""
+            # Fail fast: initialisation encountered an error, stop polling
+            err = health.get("init_error")
+            if err and not health.get("initializing", False):
+                return False, err
+        except Exception:
+            pass
         time.sleep(2)
-    return False
+    return False, "Planner initialisation timed out (building blocks still loading)."
 
 
 @atexit.register
@@ -1167,11 +1202,11 @@ def proxy_plan_synthesis(req: PlanSynthesisRequest):
 
     # 2. Wait until building blocks are loaded (first-time can take minutes)
     if not _is_synth_planner_initialized():
-        if not _wait_for_synth_init(timeout=600):
+        ok, init_err = _wait_for_synth_init(timeout=600)
+        if not ok:
             raise HTTPException(
-                status_code=504,
-                detail="Planner initialisation timed out (building blocks still loading). "
-                       "Please try again in a moment.",
+                status_code=503,
+                detail=f"Planner initialisation failed: {init_err}",
             )
 
     # 3. Forward the request
