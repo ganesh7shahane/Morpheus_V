@@ -2,9 +2,10 @@
 FastAPI backend for Morpheus V – molecule fragmentation service.
 """
 
-import os, sys, io, base64, json, asyncio, copy
+import os, sys, io, base64, json, asyncio, copy, traceback
 from pathlib import Path
 import requests as _requests
+import httpx as _httpx
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +34,7 @@ from search_replace import (
     mol_to_base64_png as sr_mol_to_png,
 )
 
-FRAGMENTS_FILE = str(Path(__file__).parent / "data" / "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz")
+FRAGMENTS_FILE = str(Path(__file__).parent / "data" / "All-In-One.txt.gz")
 DATA_DIR = Path(__file__).parent / "data"
 ALL_FRAGMENT_LIBRARIES: list[str] = sorted(p.name for p in DATA_DIR.glob("*.txt.gz"))
 
@@ -107,7 +108,21 @@ UNDESIRABLE_PATTERNS = [
     ('C1CN1', 'Aziridine (strained 3-membered N-ring)'),
     # Nitroso groups
     ('[#6][NX2]=O', 'Nitroso group (C-N=O)'),
-    ('[N][N]=O', 'N-Nitroso / Nitrosamine (carcinogenic)')
+    ('[N][N]=O', 'N-Nitroso / Nitrosamine (carcinogenic)'),
+    # Polycyclic aromatic hydrocarbons (PAH) – 3 or more fused aromatic rings
+    # Anthracene SMARTS covers linear tricyclics and larger (tetracene, pyrene, etc.)
+    ('c1ccc2cc3ccccc3cc2c1', 'PAH: linear 3+ fused aromatic rings (anthracene-type)'),
+    # Phenanthrene SMARTS covers angular tricyclics and larger (chrysene, pyrene, etc.)
+    ('c1ccc2c(c1)ccc1ccccc12', 'PAH: angular 3+ fused aromatic rings (phenanthrene-type)'),
+    # Large aliphatic macrocyclic rings (> 8 members) – poor oral bioavailability / permeability
+    ('[!a;r9]',  'Large aliphatic ring (9-membered macrocycle)'),
+    ('[!a;r10]', 'Large aliphatic ring (10-membered macrocycle)'),
+    ('[!a;r11]', 'Large aliphatic ring (11-membered macrocycle)'),
+    ('[!a;r12]', 'Large aliphatic ring (12-membered macrocycle)'),
+    ('[!a;r13]', 'Large aliphatic ring (13-membered macrocycle)'),
+    ('[!a;r14]', 'Large aliphatic ring (14-membered macrocycle)'),
+    ('[!a;r15]', 'Large aliphatic ring (15-membered macrocycle)'),
+    ('[!a;r16]', 'Large aliphatic ring (16-membered macrocycle)'),
 ]
 
 app = FastAPI(title="Morpheus V API")
@@ -1127,6 +1142,21 @@ def _start_synth_planner() -> bool:
         # Double-check inside lock
         if _is_synth_planner_up():
             return True
+        # Kill any stale process holding port 8001 before starting a fresh one
+        try:
+            stale = subprocess.run(
+                ["lsof", "-ti", "tcp:8001"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if stale:
+                for pid in stale.splitlines():
+                    try:
+                        subprocess.run(["kill", "-9", pid.strip()], check=False)
+                    except Exception:
+                        pass
+                time.sleep(0.5)
+        except Exception:
+            pass
         print("[main] Starting synth_planner service on port 8001 …")
         _synth_proc = subprocess.Popen(
             [
@@ -1189,55 +1219,70 @@ class PlanSynthesisRequest(BaseModel):
 
 
 @app.post("/plan-synthesis")
-def proxy_plan_synthesis(req: PlanSynthesisRequest):
+async def proxy_plan_synthesis(req: PlanSynthesisRequest):
     """Auto-start synth_planner if needed, wait for init, then forward."""
-    # 1. Make sure the service is running (auto-start)
+    from fastapi.responses import JSONResponse as _JSONResponse
+
+    # 1. Make sure the service is running (auto-start) — runs in thread pool
+    #    so time.sleep inside _start_synth_planner doesn't block the event loop.
+    loop = asyncio.get_event_loop()
     if not _is_synth_planner_up():
-        if not _start_synth_planner():
-            raise HTTPException(
+        started = await loop.run_in_executor(None, _start_synth_planner)
+        if not started:
+            return _JSONResponse(
                 status_code=503,
-                detail="Could not start the retrosynthetic planner service. "
-                       "Check that the synplanner conda env exists.",
+                content={"detail": "Could not start the retrosynthetic planner service. "
+                                   "Check that the synplanner conda env exists."},
             )
 
     # 2. Wait until building blocks are loaded (first-time can take minutes)
     if not _is_synth_planner_initialized():
-        ok, init_err = _wait_for_synth_init(timeout=600)
+        ok, init_err = await loop.run_in_executor(None, lambda: _wait_for_synth_init(timeout=600))
         if not ok:
-            raise HTTPException(
+            return _JSONResponse(
                 status_code=503,
-                detail=f"Planner initialisation failed: {init_err}",
+                content={"detail": f"Planner initialisation failed: {init_err}"},
             )
 
-    # 3. Forward the request
+    # 3. Forward the request via httpx (non-blocking async HTTP)
     try:
-        resp = _requests.post(
-            f"{SYNTH_PLANNER_URL}/plan-synthesis",
-            json=req.model_dump(),
-            timeout=650,
+        async with _httpx.AsyncClient(timeout=660.0) as client:
+            resp = await client.post(
+                f"{SYNTH_PLANNER_URL}/plan-synthesis",
+                json=req.model_dump(),
+            )
+    except _httpx.ConnectError:
+        return _JSONResponse(
+            status_code=503,
+            content={"detail": "Planner service connection lost. It may have crashed — check terminal logs."},
         )
-    except _requests.ConnectionError:
-        raise HTTPException(status_code=503, detail="Planner service connection lost.")
-    except _requests.Timeout:
-        raise HTTPException(status_code=504, detail="Planner request timed out.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Planner request failed: {e}")
+    except _httpx.TimeoutException:
+        return _JSONResponse(
+            status_code=504,
+            content={"detail": "Retrosynthetic planning timed out (limit: 660 s)."},
+        )
+    except BaseException as exc:
+        traceback.print_exc()
+        return _JSONResponse(
+            status_code=500,
+            content={"detail": f"Proxy error: {exc}"},
+        )
 
-    # Parse JSON – if the body is empty or HTML (uvicorn 500 page), surface
-    # the real status code and raw text so the user sees the actual error.
+    # 4. Always return JSON — even if synth_planner returned a plain-text error page
     if not resp.content:
-        raise HTTPException(
+        return _JSONResponse(
             status_code=502,
-            detail=f"Planner returned an empty response (HTTP {resp.status_code}). "
-                   "The service may have crashed – check the synth_planner logs.",
+            content={"detail": f"Planner returned an empty response (HTTP {resp.status_code}). "
+                               "The service may have crashed — check terminal logs."},
         )
     try:
-        return resp.json()
+        data = resp.json()
     except Exception:
-        raise HTTPException(
+        return _JSONResponse(
             status_code=502,
-            detail=f"Planner returned non-JSON (HTTP {resp.status_code}): {resp.text[:400]}",
+            content={"detail": f"Planner returned non-JSON (HTTP {resp.status_code}): {resp.text[:400]}"},
         )
+    return _JSONResponse(content=data, status_code=resp.status_code)
 
 
 @app.get("/synth-planner-health")

@@ -568,7 +568,7 @@ function App() {
               // Assign sequential IDs (1 = highest similarity, already sorted by backend)
               // Build library → numeric-index mapping for categorical parcoords axis
               const LIB_DISPLAY: Record<string, string> = {
-                "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz": "ChEMBL",
+                "All-In-One.txt.gz": "All-In-One",
                 "VeryCommon.txt.gz": "Very Common",
                 "Common.txt.gz": "Common",
                 "LessCommon.txt.gz": "Less Common",
@@ -580,7 +580,7 @@ function App() {
                 "Singletons.txt.gz": "Singletons",
               };
               const LIB_ORDER = [
-                "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz",
+                "All-In-One.txt.gz",
                 "VeryCommon.txt.gz", "Common.txt.gz", "LessCommon.txt.gz",
                 "Rare.txt.gz", "VeryRare.txt.gz", "ExtremelyRare.txt.gz", "UltraRare.txt.gz",
                 "Doubletons.txt.gz", "Singletons.txt.gz",
@@ -1224,7 +1224,7 @@ function App() {
                 <Box sx={{ display: "flex", flexWrap: "wrap" }}>
                   {(() => {
                     const ORDER = [
-                      "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz",
+                      "All-In-One.txt.gz",
                       "VeryCommon.txt.gz",
                       "Common.txt.gz",
                       "LessCommon.txt.gz",
@@ -1236,7 +1236,7 @@ function App() {
                       "Singletons.txt.gz",
                     ];
                     const DISPLAY: Record<string, string> = {
-                      "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz": "Entire ChEMBL",
+                      "All-In-One.txt.gz": "Entire ChEMBL",
                       "VeryCommon.txt.gz": "Very Common",
                       "Common.txt.gz": "Common",
                       "LessCommon.txt.gz": "Less Common",
@@ -1248,26 +1248,26 @@ function App() {
                       "Singletons.txt.gz": "Singletons",
                     };
                     const TIPS: Record<string, string> = {
-                      "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz":
-                        "Complete ChEMBL fragment library — contains all fragments regardless of frequency. Slowest but most comprehensive.",
+                      "All-In-One.txt.gz":
+                        "Complete ChEMBL fragment library — contains all fragments regardless of frequency. Slowest but fully comprehensive.",
                       "VeryCommon.txt.gz":
-                        "Fragments appearing in ≥ 725 bioactive ChEMBL molecules. 325 fragments — highest synthesizability & drug-likeness confidence.",
+                        "Fragments appearing in ≥ 725 ChEMBL molecules — highest synthesizability & drug-likeness confidence.",
                       "Common.txt.gz":
-                        "Fragments appearing in 215–724 bioactive ChEMBL molecules. 750 fragments — high synthetic accessibility & broad drug-like coverage.",
+                        "Fragments appearing in 215–724 ChEMBL molecules — high synthetic accessibility & broad drug-like coverage.",
                       "LessCommon.txt.gz":
-                        "Fragments appearing in 65–214 bioactive ChEMBL molecules. 1,863 fragments — good balance of diversity and frequency.",
+                        "Fragments appearing in 65–214 ChEMBL molecules — good balance of diversity and frequency.",
                       "Rare.txt.gz":
-                        "Fragments appearing in 25–64 bioactive ChEMBL molecules. 3,633 fragments — includes less-frequent fragments for broader exploration.",
+                        "Fragments appearing in 25–64 ChEMBL molecules — includes less-frequent fragments for broader exploration.",
                       "VeryRare.txt.gz":
-                        "Fragments appearing in 9–24 bioactive ChEMBL molecules. 8,164 fragments — useful for exploring unusual chemical space.",
+                        "Fragments appearing in 9–24 ChEMBL molecules — useful for exploring unusual chemical space.",
                       "ExtremelyRare.txt.gz":
-                        "Fragments appearing in 5–8 bioactive ChEMBL molecules. 8,067 fragments — low-frequency fragments for novel analogue exploration.",
+                        "Fragments appearing in 5–8 ChEMBL molecules — low-frequency fragments for novel analogue exploration.",
                       "UltraRare.txt.gz":
-                        "Fragments appearing in 3–4 bioactive ChEMBL molecules. 11,111 fragments — highly unusual fragments; use for maximum diversity.",
+                        "Fragments appearing in 3–4 ChEMBL molecules — highly unusual fragments; use for maximum diversity.",
                       "Doubletons.txt.gz":
-                        "Fragments appearing in exactly 2 bioactive ChEMBL molecules — the rarest validated fragments. Use for maximum structural novelty and scaffold hopping.",
+                        "Fragments appearing in exactly 2 ChEMBL molecules — the rarest validated fragments. Use for maximum structural novelty and scaffold hopping.",
                       "Singletons.txt.gz":
-                        "Fragments appearing in exactly 1 bioactive ChEMBL molecule — unique, one-of-a-kind fragments. Highest novelty; proceed with caution as chemical space is largely uncharted.",
+                        "Fragments appearing in exactly 1 ChEMBL molecule — unique, one-of-a-kind fragments. Highest novelty; proceed with caution as chemical space is largely uncharted.",
                     };
                     return [...fragmentLibraries]
                       .sort((a, b) => {
@@ -1278,7 +1278,7 @@ function App() {
                       .map((name) => {
                         const displayName = DISPLAY[name] ?? name.replace(/\.txt\.gz$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
                         const tip = TIPS[name] ?? name;
-                        const CHEMBL = "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz";
+                        const CHEMBL = "All-In-One.txt.gz";
                         const chemblSelected = selectedLibraries.has(CHEMBL);
                         const isChembl = name === CHEMBL;
                         const isDisabled = !isChembl && chemblSelected;
@@ -1787,7 +1787,7 @@ function App() {
                               ["SA Score", mol.sascore],
                               ["Library", mol.frag_library
                                 ? (({
-                                    "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz": "ChEMBL",
+                                    "All-In-One.txt.gz": "All-in-One",
                                     "VeryCommon.txt.gz": "Very Common",
                                     "Common.txt.gz": "Common",
                                     "LessCommon.txt.gz": "Less Common",
@@ -1952,8 +1952,8 @@ function App() {
                             <Grid container spacing={1.5} columns={6}>
                               {similarFragments.map((frag, i) => {
                                 const libDisplay =
-                                  frag.library === "fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz"
-                                    ? "ChEMBL"
+                                  frag.library === "All-In-One.txt.gz"
+                                    ? "All-in-One"
                                     : frag.library.replace(/\.txt\.gz$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
                                 const molId = fragToMolId[frag.smiles];
                                 const isRejected = rejectedSmiles.has(frag.smiles);

@@ -139,12 +139,22 @@ print("✅  All imports OK")
 PYCHECK
 
 # ---------------------------------------------------------------------------
-# 5. Kill any stale process on port 8000 before starting
+# 5. Kill any stale processes on port 8000 AND 8001 before starting.
+#    Port 8001 hosts the synth_planner micro-service; always kill it so the
+#    main backend's eager-start thread spawns a fresh process that picks up
+#    any code changes (avoids the "old code still running" 500-error problem).
 # ---------------------------------------------------------------------------
 STALE_PID=$(lsof -ti :8000 2>/dev/null || true)
 if [ -n "$STALE_PID" ]; then
     echo "⚠️   Port 8000 is in use (PID $STALE_PID). Killing stale process …"
     kill -9 $STALE_PID 2>/dev/null || true
+    sleep 0.5
+fi
+
+STALE_PID_8001=$(lsof -ti :8001 2>/dev/null || true)
+if [ -n "$STALE_PID_8001" ]; then
+    echo "⚠️   Port 8001 is in use (PID $STALE_PID_8001). Killing stale synth_planner …"
+    kill -9 $STALE_PID_8001 2>/dev/null || true
     sleep 0.5
 fi
 

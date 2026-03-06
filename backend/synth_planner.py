@@ -594,6 +594,31 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _force_json_responses(request: Request, call_next):
+    """Last-resort middleware: if anything escapes every other handler and
+    would produce a non-JSON response, catch it here and return JSON instead.
+    This sits just inside ServerErrorMiddleware so it fires before Starlette
+    can emit its bare 'Internal Server Error' text."""
+    import json as _json
+    try:
+        return await call_next(request)
+    except BaseException as exc:  # noqa: BLE001
+        traceback.print_exc()
+        body = _json.dumps({
+            "success": False,
+            "solved": False,
+            "routes": [],
+            "error": f"Unhandled server error: {type(exc).__name__}: {exc}",
+        }).encode()
+        from starlette.responses import Response as _Resp
+        return _Resp(
+            content=body,
+            status_code=500,
+            media_type="application/json",
+        )
+
+
 @app.exception_handler(Exception)
 async def _json_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """Catch-all: always return JSON so the proxy never sees a raw HTML 500.
@@ -656,6 +681,7 @@ def health():
 
 @app.post("/plan-synthesis")
 def api_plan_synthesis(req: PlanRequest):
+    import json as _json
     try:
         result = plan_synthesis(
             smiles=req.smiles,
@@ -665,24 +691,22 @@ def api_plan_synthesis(req: PlanRequest):
             max_iterations=req.max_iterations,
             min_mol_size=req.min_mol_size,
         )
-        # Validate JSON serializability before FastAPI touches the object.
-        # Use jsonable_encoder which handles numpy/pydantic types the same
-        # way FastAPI does, guaranteeing no serialization surprise downstream.
+        # Force-serialize through json.dumps with default=str so that any
+        # numpy scalar, CGRtools object, or other non-serializable type is
+        # converted to a string INSIDE this function, before FastAPI ever
+        # tries to serialize the return value itself.  Returning a
+        # JSONResponse (pre-rendered bytes) bypasses FastAPI's serialization
+        # path entirely, which is what was causing the bare-HTML 500 error.
         try:
-            from fastapi.encoders import jsonable_encoder as _enc
-            import json as _json
-            _json.dumps(_enc(result))
+            safe = _json.loads(_json.dumps(result, default=str))
         except Exception as _se:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "success": False,
-                    "solved": False,
-                    "routes": [],
-                    "error": f"Result contained non-serializable data: {_se}",
-                },
-            )
-        return result
+            safe = {
+                "success": False,
+                "solved": False,
+                "routes": [],
+                "error": f"Result serialization failed: {_se}",
+            }
+        return JSONResponse(content=safe, status_code=200)
     except BaseException as _exc:  # noqa: BLE001 – catch SystemExit, MemoryError, etc.
         traceback.print_exc()
         return JSONResponse(

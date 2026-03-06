@@ -94,7 +94,7 @@ Once set up, clicking **"Run Retrosynthetic Planning"** auto-starts the secondar
 | File | Size | Tracked in git |
 |---|---|---|
 | `data/building_blocks_em_sa_ln_with_ids.sdf.gz` | 25 MB | yes |
-| `data/fragments_cleaned_whole_filtered_chembl_with_smiles.txt.gz` | ~5 MB | yes — "Entire ChEMBL" library |
+| `data/All-In-One.txt.gz` | ~5 MB | yes — "All-In-One" library (entire ChEMBL) |
 | `data/VeryCommon.txt.gz` … `data/Singletons.txt.gz` | varies | optional — place in `data/` to unlock tiered libraries |
 | `data/*.sdf` (uncompressed, 276 MB) | 276 MB | no — too large |
 | `data/*.pickle` (derived cache) | ~30 MB | no — auto-generated |
