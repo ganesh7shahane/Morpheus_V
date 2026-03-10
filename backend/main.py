@@ -276,6 +276,51 @@ def screen_molecule(mol) -> list[str]:
     return matched
 
 
+def _make_highlight_image(mol, new_frag_wildcard_smiles: str) -> str:
+    """Return a base64 PNG of *mol* with the new-fragment atoms/bonds highlighted
+    in magenta.  Wildcard attachment-point atoms ([*:N]) are excluded so only
+    genuine fragment heavy atoms are coloured."""
+    import re as _re
+    try:
+        from rdkit.Chem.Draw import rdMolDraw2D
+        # Convert [*:N] attachment-point tokens to bare [*] for SMARTS matching
+        query_smarts = _re.sub(r'\[\*:\d+\]', '[*]', new_frag_wildcard_smiles)
+        query = Chem.MolFromSmarts(query_smarts)
+        if query is None:
+            return sr_mol_to_png(mol, size=(600, 600))
+        matches = mol.GetSubstructMatches(query)
+        if not matches:
+            return sr_mol_to_png(mol, size=(600, 600))
+        match = matches[0]
+        # Query atoms with atomic num 0 are the wildcards — they map to scaffold
+        # attachment atoms, not new-fragment atoms, so exclude them.
+        wildcard_q_idx = {i for i, a in enumerate(query.GetAtoms()) if a.GetAtomicNum() == 0}
+        hl_atoms = [match[i] for i in range(len(match)) if i not in wildcard_q_idx]
+        if not hl_atoms:
+            return sr_mol_to_png(mol, size=(600, 600))
+        hl_set = set(hl_atoms)
+        hl_bonds = [
+            b.GetIdx() for b in mol.GetBonds()
+            if b.GetBeginAtomIdx() in hl_set and b.GetEndAtomIdx() in hl_set
+        ]
+        magenta = (0.25, 0.85, 0.25)
+        atom_colors = {idx: magenta for idx in hl_atoms}
+        bond_colors = {idx: magenta for idx in hl_bonds}
+        drawer = rdMolDraw2D.MolDraw2DCairo(600, 600)
+        rdMolDraw2D.PrepareAndDrawMolecule(
+            drawer, mol,
+            highlightAtoms=hl_atoms,
+            highlightBonds=hl_bonds,
+            highlightAtomColors=atom_colors,
+            highlightBondColors=bond_colors,
+        )
+        drawer.FinishDrawing()
+        return base64.b64encode(drawer.GetDrawingText()).decode()
+    except Exception as _e:
+        print(f"[highlight] {_e}", flush=True)
+        return sr_mol_to_png(mol, size=(600, 600))
+
+
 class SearchReplaceResponse(BaseModel):
     similar_fragments: list[dict]  # [{smiles, similarity, image}]
     generated_molecules: list[GeneratedMolecule]
@@ -478,6 +523,7 @@ async def search_and_replace(req: SearchReplaceRequest):
             mol_entry = {
                 "smiles": new_smi,
                 "image": sr_mol_to_png(new_mol, size=(600, 600)),
+                "image_highlighted": _make_highlight_image(new_mol, smi),
                 "new_fragment_smiles": smi,
                 "frag_library": lib,
                 "frag_similarity": round(sim, 4),

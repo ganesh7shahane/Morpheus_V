@@ -85,6 +85,7 @@ const EXAMPLE_MOLECULES: Record<string, string> = {
     "C[C@H]([C@@H](C)OC1=NC(=NC=C1C(F)(F)F)NC2=CC=C(C=C2)[S@](=N)(=O)C3CC3)O",
   GV134:
     "FC1(F)CN(C1)C(=O)C=2N(C)c3cc(ccc3C2)c4nccc(n4)N5CC[C@@H](C5)C=6C=NNC6",
+  CDK2_Inhibitor: "NS(=O)(=O)C1=CC=C(NC2=NC(C3=CN=C4C=CC=CN34)=CC=N2)C=C1",
 };
 
 interface FragmentInfo {
@@ -136,6 +137,7 @@ interface GeneratedMolecule {
   id: number;
   smiles: string;
   image: string;
+  image_highlighted?: string;
   new_fragment_smiles?: string;
   frag_library?: string;
   frag_library_idx?: number;
@@ -224,12 +226,80 @@ interface RetroResult {
 }
 
 // Descriptors shown in parallel coordinates (order = axis order)
+// ---------------------------------------------------------------------------
+// Client-side fragment highlight recolouring helpers
+// The backend renders image_highlighted using green (R=0.25,G=0.85,B=0.25)
+// which maps to hue ~120°.  These helpers let the user swap that hue to any
+// colour they choose, entirely in the browser via Canvas pixel manipulation.
+// ---------------------------------------------------------------------------
+function _hexToRgb(hex: string): [number, number, number] {
+  const c = hex.replace("#", "");
+  return [parseInt(c.slice(0,2),16), parseInt(c.slice(2,4),16), parseInt(c.slice(4,6),16)];
+}
+function _rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r,g,b), min = Math.min(r,g,b), l = (max+min)/2;
+  if (max === min) return [0, 0, l];
+  const d = max-min, s = l > 0.5 ? d/(2-max-min) : d/(max+min);
+  let h = 0;
+  if (max===r) h = ((g-b)/d + (g<b?6:0))/6;
+  else if (max===g) h = ((b-r)/d+2)/6;
+  else h = ((r-g)/d+4)/6;
+  return [h*360, s, l];
+}
+function _hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  h /= 360;
+  if (s === 0) { const v = Math.round(l*255); return [v,v,v]; }
+  const q = l<0.5 ? l*(1+s) : l+s-l*s, p = 2*l-q;
+  const hue2 = (t: number) => {
+    if (t<0) t+=1; if (t>1) t-=1;
+    if (t<1/6) return p+(q-p)*6*t;
+    if (t<1/2) return q;
+    if (t<2/3) return p+(q-p)*(2/3-t)*6;
+    return p;
+  };
+  return [Math.round(hue2(h+1/3)*255), Math.round(hue2(h)*255), Math.round(hue2(h-1/3)*255)];
+}
+/** Replace pixels near the backend's green hue (120°) with the target colour. */
+function recolorHighlightImage(base64: string, targetHex: string): Promise<string> {
+  const [tr, tg, tb] = _hexToRgb(targetHex);
+  const [targetH, targetS] = _rgbToHsl(tr, tg, tb);
+  return new Promise<string>((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext("2d")!;
+      ctx.drawImage(img, 0, 0);
+      const id = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = id.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const [h, s, l] = _rgbToHsl(d[i], d[i+1], d[i+2]);
+        if (s > 0.22) {
+          let diff = Math.abs(h - 120);
+          if (diff > 180) diff = 360 - diff;
+          if (diff < 45) {
+            const [nr, ng, nb] = _hslToRgb(targetH, Math.max(s, targetS * 0.8), l);
+            d[i] = nr; d[i+1] = ng; d[i+2] = nb;
+          }
+        }
+      }
+      ctx.putImageData(id, 0, 0);
+      // strip the "data:image/png;base64," prefix
+      resolve(canvas.toDataURL("image/png").split(",")[1]);
+    };
+    img.onerror = () => resolve(base64); // fallback: return original
+    img.src = `data:image/png;base64,${base64}`;
+  });
+}
+const _DEFAULT_HIGHLIGHT_COLOR = "#40d940";
+
 const DESCRIPTOR_KEYS: { key: string; label: string }[] = [
   { key: "mscore", label: "MScore" },
   { key: "shape_esp", label: "Shape×ESP" },
   { key: "shape_sim", label: "Shape Sim" },
   { key: "esp_sim", label: "ESP Sim" },
-  { key: "mol_similarity", label: "Tanimoto" },
+  { key: "mol_similarity", label: "Tan. Sim" },
   { key: "frag_similarity", label: "Frag. Sim" },
   { key: "frag_library_idx", label: "Library" },
   { key: "mw", label: "MW" },
@@ -273,6 +343,10 @@ function App() {
   const MOLS_PER_PAGE = 20;
   const [molFilters, setMolFilters] = useState<Record<string, FilterRange>>({});
   const [showAllMols, setShowAllMols] = useState(false);
+  const [showFragHighlight, setShowFragHighlight] = useState(false);
+  const [highlightColor, setHighlightColor] = useState(_DEFAULT_HIGHLIGHT_COLOR);
+  const [debouncedHighlightColor, setDebouncedHighlightColor] = useState(_DEFAULT_HIGHLIGHT_COLOR);
+  const [recoloredImages, setRecoloredImages] = useState<Map<number, string>>(new Map());
   const [legendCols, setLegendCols] = useState<string[]>(["mscore", "mol_similarity", "qed"]);
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [sortKey, setSortKey] = useState<string>("mscore");
@@ -324,17 +398,17 @@ function App() {
                 primary: { main: "#5c9eff" },
               }
             : {
-                background: { default: "#edf0f7", paper: "#f5f8ff" },
+                background: { default: "#e4e4dd", paper: "#faf9f5" }, //
                 primary: { main: "#2563eb" },
                 secondary: { main: "#7c3aed" },
-                divider: "#d4dcea",
+                divider: "#9fa2a8",
                 text: {
                   primary: "#1e2a3a",
-                  secondary: "#55677d",
+                  secondary: "#3d4a5c",
                 },
                 action: {
-                  hover: "rgba(37,99,235,0.06)",
-                  selected: "rgba(37,99,235,0.10)",
+                  hover: "rgba(37,99,235,0.08)",
+                  selected: "rgba(37,99,235,0.13)",
                 },
               }),
         },
@@ -345,7 +419,7 @@ function App() {
                 borderRadius: 16,
                 ...(!darkMode && {
                   backgroundImage: "none",
-                  boxShadow: "0 1px 4px 0 rgba(30,42,58,0.07), 0 0 0 1px rgba(30,42,58,0.05)",
+                  boxShadow: "0 2px 8px 0 rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.08)",
                 }),
               },
             },
@@ -357,10 +431,19 @@ function App() {
               },
             },
           },
+          MuiAccordion: {
+            styleOverrides: {
+              root: {
+                borderRadius: "16px !important",
+                overflow: "hidden",
+                "&:before": { display: "none" },
+              },
+            },
+          },
           MuiDivider: {
             styleOverrides: {
               root: {
-                ...(!darkMode && { borderColor: "#d4dcea" }),
+                ...(!darkMode && { borderColor: "#9fa2a8" }),
               },
             },
           },
@@ -385,6 +468,8 @@ function App() {
     setSearchError(null);
     setMolFilters({});
     setShowAllMols(false);
+    setShowFragHighlight(false);
+    setRecoloredImages(new Map());
     setLegendCols(["mscore", "mol_similarity", "qed"]);
     setSortKey("mscore");
     setSortDir("desc");
@@ -443,6 +528,40 @@ function App() {
       })
       .catch(() => {});
   }, []);
+
+  // Recolour fragment-highlight images whenever colour or molecule list changes
+  // Debounce the colour so we don't reprocess 200 images on every picker drag event.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedHighlightColor(highlightColor), 150);
+    return () => clearTimeout(t);
+  }, [highlightColor]);
+
+  useEffect(() => {
+    if (!showFragHighlight || generatedMols.length === 0) {
+      setRecoloredImages(new Map());
+      return;
+    }
+    if (debouncedHighlightColor.toLowerCase() === _DEFAULT_HIGHLIGHT_COLOR) {
+      // Default colour — use backend images as-is
+      setRecoloredImages(new Map());
+      return;
+    }
+    let cancelled = false;
+    const run = async () => {
+      const pairs: [number, string][] = [];
+      for (const mol of generatedMols) {
+        if (cancelled) return;
+        if (!mol.image_highlighted) continue;
+        try {
+          const img = await recolorHighlightImage(mol.image_highlighted, debouncedHighlightColor);
+          pairs.push([mol.id, img]);
+        } catch { /* skip */ }
+      }
+      if (!cancelled) setRecoloredImages(new Map(pairs));
+    };
+    run();
+    return () => { cancelled = true; };
+  }, [showFragHighlight, debouncedHighlightColor, generatedMols]);
 
   // Load 3Dmol.js script once
   useEffect(() => {
@@ -518,6 +637,8 @@ function App() {
     setSimilarFragments([]);
     setMolFilters({});
     setShowAllMols(false);
+    setShowFragHighlight(false);
+    setRecoloredImages(new Map());
     setLegendCols(["mscore", "mol_similarity", "qed"]);
     setSortKey("mscore");
     setSortDir("desc");
@@ -1057,10 +1178,8 @@ function App() {
             </Box>
           </Paper>
 
-          <Divider sx={{ mb: 3 }} />
-
           {/* Fragments */}
-          <Paper elevation={1} sx={{ p: 3 }}>
+          <Paper elevation={1} sx={{ p: 3, mt: 3 }}>
             <Typography variant="h6" fontWeight={600} sx={{ mb: 0.5, textAlign: "center" }}>
               Fragments ({result.displayed_fragments} displayed,{" "}
               {result.total_fragments} total)
@@ -1497,6 +1616,75 @@ function App() {
                       >
                         {showAllMols ? "Showing all — click to filter" : "Show all (ignore filters)"}
                       </Button>
+                      <Tooltip title={showFragHighlight ? "Fragment highlight ON — click switch to turn off" : "Highlight the newly incorporated fragment atoms and bonds"}>
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, ml: 0.5, cursor: "pointer" }} onClick={() => setShowFragHighlight((v) => !v)}>
+                          <Switch
+                            size="small"
+                            checked={showFragHighlight}
+                            onChange={(e) => setShowFragHighlight(e.target.checked)}
+                            color="success"
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              fontSize: 11,
+                              fontWeight: showFragHighlight ? 700 : 400,
+                              color: showFragHighlight ? highlightColor : "text.secondary",
+                              whiteSpace: "nowrap",
+                              userSelect: "none",
+                            }}
+                          >
+                            Highlight fragment
+                          </Typography>
+                        </Box>
+                      </Tooltip>
+                      {showFragHighlight && (
+                        <Tooltip title="Pick highlight colour">
+                          <Box
+                            sx={{
+                              position: "relative",
+                              width: 20,
+                              height: 20,
+                              flexShrink: 0,
+                              ml: 0.25,
+                              cursor: "pointer",
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {/* Visible swatch */}
+                            <Box
+                              sx={{
+                                width: 18,
+                                height: 18,
+                                borderRadius: "50%",
+                                bgcolor: highlightColor,
+                                border: "2px solid",
+                                borderColor: "divider",
+                                boxShadow: 1,
+                                pointerEvents: "none",
+                              }}
+                            />
+                            {/* Transparent native colour-picker input overlaid on the swatch */}
+                            <input
+                              type="color"
+                              value={highlightColor}
+                              onChange={(e) => setHighlightColor(e.target.value)}
+                              style={{
+                                position: "absolute",
+                                top: 0,
+                                left: 0,
+                                width: "100%",
+                                height: "100%",
+                                opacity: 0,
+                                cursor: "pointer",
+                                border: "none",
+                                padding: 0,
+                              }}
+                            />
+                          </Box>
+                        </Tooltip>
+                      )}
                     </Box>
                   </Box>
                 )}
@@ -1769,7 +1957,7 @@ function App() {
                         </MenuItem>
                       </Menu>
 
-                <Grid container spacing={2} columns={4}>
+                <Grid container spacing={0.5} columns={4}>
                   {pagedMols.map((mol, idx) => (
                     <Grid size={1} key={(molPage - 1) * MOLS_PER_PAGE + idx}>
                       <Tooltip
@@ -1852,13 +2040,13 @@ function App() {
                           </Box>
                         )}
                         <img
-                          src={`data:image/png;base64,${mol.image}`}
+                          src={`data:image/png;base64,${showFragHighlight ? (recoloredImages.get(mol.id) ?? mol.image_highlighted ?? mol.image) : mol.image}`}
                           alt=""
                           style={{
                             width: "100%",
                             aspectRatio: "1 / 1",
                             objectFit: "contain",
-                            padding: 8,
+                            padding: 4,
                             display: "block",
                           }}
                         />
@@ -1901,7 +2089,7 @@ function App() {
                               if (val == null || !desc) return null;
                               const display =
                                 key === "mol_similarity"
-                                  ? `Sim ${(val * 100).toFixed(0)}%`
+                                  ? `Tan. Sim ${(val * 100).toFixed(0)}%`
                                   : key === "shape_sim"
                                   ? `Shape ${(val * 100).toFixed(0)}%`
                                   : key === "esp_sim"
