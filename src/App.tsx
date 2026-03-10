@@ -37,6 +37,12 @@ import {
   Switch,
   Checkbox,
   FormControlLabel,
+  Drawer,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
 } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ScienceIcon from "@mui/icons-material/Science";
@@ -55,6 +61,9 @@ import ClearIcon from "@mui/icons-material/Clear";
 import BiotechIcon from "@mui/icons-material/Biotech";
 import MoreVertIcon from "@mui/icons-material/MoreVert";
 import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
+import MenuIcon from "@mui/icons-material/Menu";
+import HomeIcon from "@mui/icons-material/Home";
+import YardIcon from "@mui/icons-material/Yard";
 import axios from "axios";
 import Plot from "react-plotly.js";
 import ErrorBoundary from "./ErrorBoundary";
@@ -225,6 +234,13 @@ interface RetroResult {
   target_smiles?: string;
 }
 
+interface ThreeDCompareData {
+  mol_block_input: string;
+  mol_block_analog: string;
+  mcs_atoms: number;
+  rmsd: number | null;
+}
+
 // Descriptors shown in parallel coordinates (order = axis order)
 // ---------------------------------------------------------------------------
 // Client-side fragment highlight recolouring helpers
@@ -314,6 +330,149 @@ const DESCRIPTOR_KEYS: { key: string; label: string }[] = [
   { key: "sascore", label: "SA Score" },
 ];
 
+// ---------------------------------------------------------------------------
+// Fragment Search page – stub, to be built out
+// ---------------------------------------------------------------------------
+const _DEFAULT_FRAG_SMILES = "[*:1]C1=C([*:2])N2N=CN=C2S1";
+
+function FragmentSearchPage() {
+  const [smiles, setSmiles] = useState(_DEFAULT_FRAG_SMILES);
+  const [image, setImage] = useState<string | null>(null);
+  const [imgError, setImgError] = useState<string | null>(null);
+  const [imgLoading, setImgLoading] = useState(false);
+  const [matchResult, setMatchResult] = useState<{ found: boolean; library?: string | null } | null>(null);
+  const [matchLoading, setMatchLoading] = useState(false);
+
+  // Fetch 2D image whenever smiles changes (debounced 400 ms) — no search yet
+  useEffect(() => {
+    if (!smiles.trim()) { setImage(null); setImgError(null); setMatchResult(null); return; }
+    const t = setTimeout(async () => {
+      setImgLoading(true);
+      setImgError(null);
+      try {
+        const resp = await axios.post<{ image: string; valid: boolean; error?: string }>(
+          `${API_URL}/smiles-to-image`, { smiles }
+        );
+        if (resp.data.valid) {
+          setImage(resp.data.image);
+        } else {
+          setImage(null);
+          setImgError(resp.data.error ?? "Invalid SMILES");
+        }
+      } catch {
+        setImage(null);
+        setImgError("Could not fetch image");
+      } finally {
+        setImgLoading(false);
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [smiles]);
+
+  // Search handler — triggered by button press only
+  const handleSearch = useCallback(async () => {
+    if (!smiles.trim()) return;
+    setMatchLoading(true);
+    setMatchResult(null);
+    try {
+      const resp = await axios.post<{ found: boolean; library?: string | null; error?: string }>(
+        `${API_URL}/fragment-exact-match`, { smiles }
+      );
+      if (!resp.data.error) {
+        setMatchResult({ found: resp.data.found, library: resp.data.library });
+      }
+    } catch {
+      setMatchResult(null);
+    } finally {
+      setMatchLoading(false);
+    }
+  }, [smiles]);
+
+  return (
+    <Container maxWidth="md" sx={{ py: 6 }}>
+      <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 1.5, mb: 4 }}>
+        <YardIcon sx={{ fontSize: 36, color: "primary.main" }} />
+        <Typography variant="h4" fontWeight={700}>
+          Fragment Search
+        </Typography>
+      </Box>
+
+      {/* 2D structure preview */}
+      <Box
+        sx={{
+          width: "100%",
+          minHeight: 260,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          mb: 3,
+          borderRadius: 3,
+          border: 1,
+          borderColor: "divider",
+          bgcolor: "background.paper",
+          overflow: "hidden",
+        }}
+      >
+        {imgLoading && <CircularProgress size={32} />}
+        {!imgLoading && image && (
+          <img
+            src={`data:image/png;base64,${image}`}
+            alt="2D structure"
+            style={{ maxWidth: "100%", maxHeight: 380, objectFit: "contain" }}
+          />
+        )}
+        {!imgLoading && !image && !imgError && (
+          <Typography variant="body2" color="text.secondary">Enter a SMILES to preview its structure</Typography>
+        )}
+        {!imgLoading && imgError && (
+          <Typography variant="body2" color="error">{imgError}</Typography>
+        )}
+      </Box>
+
+      {/* SMILES input — centered text */}
+      <TextField
+        fullWidth
+        label="SMILES"
+        value={smiles}
+        onChange={(e) => { setSmiles(e.target.value); setMatchResult(null); }}
+        placeholder="Enter SMILES string"
+        variant="outlined"
+        error={!!imgError}
+        helperText={imgError ?? " "}
+        inputProps={{ style: { textAlign: "center", fontFamily: "monospace" } }}
+      />
+
+      {/* Search button */}
+      <Box sx={{ display: "flex", justifyContent: "center", mt: 1, mb: 1 }}>
+        <Button
+          variant="contained"
+          startIcon={matchLoading ? <CircularProgress size={16} color="inherit" /> : <SearchIcon />}
+          onClick={handleSearch}
+          disabled={matchLoading || !smiles.trim() || !!imgError}
+          sx={{ textTransform: "none", minWidth: 140 }}
+        >
+          {matchLoading ? "Searching…" : "Search"}
+        </Button>
+      </Box>
+
+      {/* Exact-match result */}
+      {matchResult !== null && (
+        <Box sx={{ display: "flex", justifyContent: "center" }}>
+          {matchResult.found ? (
+            <Alert severity="success" sx={{ py: 0.5 }}>
+              This fragment is present in library <strong>{matchResult.library}</strong>.
+            </Alert>
+          ) : (
+            <Alert severity="info" sx={{ py: 0.5 }}>
+              An exact match of this fragment is not present in any of the fragment libraries.
+            </Alert>
+          )}
+        </Box>
+      )}
+    </Container>
+  );
+}
+
 function App() {
   const [smilesInput, setSmilesInput] = useState("");
   const [selectedExample, setSelectedExample] = useState("");
@@ -324,6 +483,8 @@ function App() {
   const [selectedFragIdx, setSelectedFragIdx] = useState<number | null>(null);
   const [ketcherExpanded, setKetcherExpanded] = useState(false);
   const [darkMode, setDarkMode] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activePage, setActivePage] = useState<"home" | "fragment-search">("home");
   const viewerContainerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
 
@@ -375,6 +536,15 @@ function App() {
   const [alignError, setAlignError] = useState<string | null>(null);
   const molstarIframeRef = useRef<HTMLIFrameElement>(null);
   const [bgColor, setBgColor] = useState("#ffffff");
+
+  // 3D Ligand Comparison state
+  const [selected3dMolIdx, setSelected3dMolIdx] = useState(0);
+  const [threeDData, setThreeDData] = useState<ThreeDCompareData | null>(null);
+  const [threeDLoading, setThreeDLoading] = useState(false);
+  const [threeDError, setThreeDError] = useState<string | null>(null);
+  const [showInputMol3d, setShowInputMol3d] = useState(true);
+  const [sideBySide3d, setSideBySide3d] = useState(false);
+  const [sideBySideDist, setSideBySideDist] = useState(15);
 
   // Retrosynthetic Planning state
   const [retroSelectedSmiles, setRetroSelectedSmiles] = useState<string>("");
@@ -470,6 +640,11 @@ function App() {
     setShowAllMols(false);
     setShowFragHighlight(false);
     setRecoloredImages(new Map());
+    setThreeDData(null);
+    setThreeDError(null);
+    setSelected3dMolIdx(0);
+    setSideBySide3d(false);
+    setSideBySideDist(15);
     setLegendCols(["mscore", "mol_similarity", "qed"]);
     setSortKey("mscore");
     setSortDir("desc");
@@ -639,6 +814,11 @@ function App() {
     setShowAllMols(false);
     setShowFragHighlight(false);
     setRecoloredImages(new Map());
+    setThreeDData(null);
+    setThreeDError(null);
+    setSelected3dMolIdx(0);
+    setSideBySide3d(false);
+    setSideBySideDist(15);
     setLegendCols(["mscore", "mol_similarity", "qed"]);
     setSortKey("mscore");
     setSortDir("desc");
@@ -945,6 +1125,95 @@ function App() {
 </html>`;
   }, [pdbInfo, bgColor, alignmentResult]);
 
+  // --- 3D Ligand comparison ---
+  const fetch3DComparison = useCallback(async (analogSmiles: string) => {
+    if (!smilesInput) return;
+    setThreeDLoading(true);
+    setThreeDError(null);
+    setThreeDData(null);
+    try {
+      const resp = await axios.post<ThreeDCompareData>(`${API_URL}/3d-align-comparison`, {
+        original_smiles: smilesInput,
+        analog_smiles: analogSmiles,
+      });
+      setThreeDData(resp.data);
+    } catch (e: any) {
+      setThreeDError(e?.response?.data?.detail ?? e?.message ?? "Failed to generate 3D view");
+    } finally {
+      setThreeDLoading(false);
+    }
+  }, [smilesInput]);
+
+  const threeDViewerHtml = useMemo(() => {
+    if (!threeDData) return "";
+    const analogMol = generatedMols[selected3dMolIdx];
+    const analogLabel = analogMol ? `Analog #${analogMol.id}` : `Analog #${selected3dMolIdx + 1}`;
+    const inputSdJSON = JSON.stringify(threeDData.mol_block_input);
+    const analogSdJSON = JSON.stringify(threeDData.mol_block_analog);
+    // Polar-H helper: atoms within 1.3 Å of N, O or S
+    const polarHSel = (model: number) =>
+      `{model:${model},elem:'H',within:{distance:1.3,sel:{model:${model},elem:['N','O','S']}}}`;
+    const heavySel = (model: number) => `{model:${model},not:{elem:'H'}}`;
+
+    // JS helper embedded in HTML to shift X-coords of an SDF mol block
+    const shiftFn = `
+    function shiftMolBlockX(mb, dx) {
+      var lines = mb.split('\\n');
+      var n = parseInt(lines[3].substring(0,3).trim());
+      for (var i=4; i<4+n; i++) {
+        if (!lines[i]) continue;
+        var x = parseFloat(lines[i].substring(0,10)) + dx;
+        var xs = x.toFixed(4); while(xs.length<10) xs=' '+xs;
+        lines[i] = xs + lines[i].substring(10);
+      }
+      return lines.join('\\n');
+    }`;
+
+    // When side-by-side: add both models with analog shifted by sideBySideDist Å in X
+    const analogLoadExpr = sideBySide3d
+      ? `shiftMolBlockX(${analogSdJSON}, ${sideBySideDist})`
+      : analogSdJSON;
+
+    const inputStyle = showInputMol3d
+      ? [
+          `viewer.addModel(${inputSdJSON},'sdf');`,
+          `viewer.addModel(${analogLoadExpr},'sdf');`,
+          `viewer.setStyle({},{});`,
+          // input heavy atoms
+          `viewer.addStyle(${heavySel(0)},{stick:{radius:0.2,colorscheme:{prop:'elem',map:inputScheme}}});`,
+          // input polar H
+          `viewer.addStyle(${polarHSel(0)},{stick:{radius:0.08,colorscheme:{prop:'elem',map:inputScheme}}});`,
+          // analog heavy atoms
+          `viewer.addStyle(${heavySel(1)},{stick:{radius:0.15,colorscheme:{prop:'elem',map:analogScheme}}});`,
+          // analog polar H
+          `viewer.addStyle(${polarHSel(1)},{stick:{radius:0.06,colorscheme:{prop:'elem',map:analogScheme}}});`,
+        ].join("\n    ")
+      : [
+          `viewer.addModel(${analogLoadExpr},'sdf');`,
+          `viewer.setStyle({},{});`,
+          `viewer.addStyle({not:{elem:'H'}},{stick:{radius:0.2,colorscheme:{prop:'elem',map:analogScheme}}});`,
+          `viewer.addStyle({elem:'H',within:{distance:1.3,sel:{elem:['N','O','S']}}},{stick:{radius:0.08,colorscheme:{prop:'elem',map:analogScheme}}});`,
+        ].join("\n    ");
+    return `<!DOCTYPE html><html><head>
+  <script src="https://3Dmol.csb.pitt.edu/build/3Dmol-min.js"><\/script>
+  <style>body{margin:0;padding:0;font-family:sans-serif;background:#fff}</style>
+</head><body>
+  <div style="padding:6px 8px 2px;font-size:12px;">
+    ${showInputMol3d ? `<span style="display:inline-block;width:12px;height:12px;background:#3498db;margin-right:4px;vertical-align:middle;"></span><strong style="color:#3498db;">Input (blue C)</strong>&nbsp;&nbsp;` : ''}
+    <span style="display:inline-block;width:12px;height:12px;background:#e74c3c;margin-right:4px;vertical-align:middle;"></span><strong style="color:#e74c3c;">${analogLabel} (red C)</strong>
+  </div>
+  <div id="v3d" style="width:100%;height:490px;position:relative;"></div>
+  <script>
+    ${shiftFn}
+    var inputScheme={'C':'#3498db','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'};
+    var analogScheme={'C':'#e74c3c','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'};
+    var viewer=$3Dmol.createViewer('v3d',{backgroundColor:'white'});
+    ${inputStyle}
+    viewer.zoomTo();viewer.render();
+  <\/script>
+</body></html>`;
+  }, [threeDData, showInputMol3d, sideBySide3d, sideBySideDist, selected3dMolIdx, generatedMols]);
+
   const fragTypeColor = (t: string) => {
     switch (t) {
       case "ring":
@@ -964,20 +1233,85 @@ function App() {
     <ErrorBoundary fallbackMessage="Something went wrong. Please refresh the page.">
     <ThemeProvider theme={theme}>
       <CssBaseline />
+
+      {/* ── Hamburger button (fixed top-left) ── */}
+      <IconButton
+        onClick={() => setDrawerOpen(true)}
+        size="medium"
+        sx={{
+          position: "fixed",
+          top: 12,
+          left: 12,
+          zIndex: 1300,
+          bgcolor: "background.paper",
+          boxShadow: 2,
+          "&:hover": { bgcolor: "action.hover" },
+        }}
+      >
+        <MenuIcon />
+      </IconButton>
+
+      {/* ── Side navigation Drawer ── */}
+      <Drawer anchor="left" open={drawerOpen} onClose={() => setDrawerOpen(false)}>
+        <Box sx={{ width: 210, pt: 2 }}>
+          <Typography
+            variant="overline"
+            sx={{ px: 2, mb: 1, display: "block", color: "text.secondary", fontWeight: 700 }}
+          >
+            Morpheus V
+          </Typography>
+          <Divider sx={{ mb: 1 }} />
+          <List disablePadding>
+            <ListItem disablePadding>
+              <ListItemButton
+                selected={activePage === "home"}
+                onClick={() => { setActivePage("home"); setDrawerOpen(false); }}
+              >
+                <ListItemIcon sx={{ minWidth: 36 }}><HomeIcon /></ListItemIcon>
+                <ListItemText primary="Home" />
+              </ListItemButton>
+            </ListItem>
+            <ListItem disablePadding>
+              <ListItemButton
+                selected={activePage === "fragment-search"}
+                onClick={() => { setActivePage("fragment-search"); setDrawerOpen(false); }}
+              >
+                <ListItemIcon sx={{ minWidth: 36 }}><YardIcon /></ListItemIcon>
+                <ListItemText primary="Fragment Search" />
+              </ListItemButton>
+            </ListItem>
+          </List>
+        </Box>
+      </Drawer>
+
+      {/* ── Dark mode toggle (fixed top-right) ── */}
+      <Tooltip title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
+        <IconButton
+          onClick={() => setDarkMode((d) => !d)}
+          size="medium"
+          sx={{
+            position: "fixed",
+            top: 12,
+            right: 12,
+            zIndex: 1300,
+            bgcolor: "background.paper",
+            boxShadow: 2,
+            "&:hover": { bgcolor: "action.hover" },
+          }}
+        >
+          {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
+        </IconButton>
+      </Tooltip>
+
+      {/* ── Page switcher ── */}
+      {activePage === "home" && (
       <Container maxWidth="lg" sx={{ py: 4 }}>
         {/* Title */}
-      <Box sx={{ mb: 3, display: "flex", alignItems: "center", gap: 1 }}>
-        <Box sx={{ flex: 1 }} />
+      <Box sx={{ mb: 3, display: "flex", alignItems: "center", justifyContent: "center", gap: 1 }}>
         <ScienceIcon sx={{ fontSize: 36, color: "primary.main" }} />
         <Typography variant="h4" fontWeight={700}>
           Morpheus V
         </Typography>
-        <Box sx={{ flex: 1 }} />
-        <Tooltip title={darkMode ? "Switch to light mode" : "Switch to dark mode"}>
-          <IconButton onClick={() => setDarkMode((d) => !d)} color="inherit">
-            {darkMode ? <LightModeIcon /> : <DarkModeIcon />}
-          </IconButton>
-        </Tooltip>
       </Box>
       <Typography variant="body2" color="text.secondary" sx={{ mb: 3, textAlign: "center" }}>
         A tool for scaffold hopping and bioisosteric replacement.
@@ -2218,6 +2552,122 @@ function App() {
         </>
       )}
 
+        {/* ---- 3D Ligand ---- */}
+        {generatedMols.length > 0 && (
+          <Accordion sx={{ mt: 3 }} defaultExpanded={false}>
+            <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+              <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 1, width: "100%" }}>
+                <BiotechIcon fontSize="small" color="primary" />
+                <Typography fontWeight={600}>3D Ligand</Typography>
+              </Box>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2, textAlign: "center" }}>
+                Select a generated molecule to compare its 3D structure with the input molecule.
+              </Typography>
+              <Box sx={{ display: "flex", gap: 2, height: 560 }}>
+                {/* Left: molecule selector */}
+                <Box sx={{ width: 210, flexShrink: 0, overflowY: "auto", border: 1, borderColor: "divider", borderRadius: 2, p: 1 }}>
+                  <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ px: 0.5, mb: 0.5, display: "block" }}>
+                    Select molecule
+                  </Typography>
+                  {generatedMols.map((mol, idx) => (
+                    <Box
+                      key={mol.id}
+                      onClick={() => { setSelected3dMolIdx(idx); fetch3DComparison(mol.smiles); }}
+                      sx={{
+                        cursor: "pointer", p: 0.75, mb: 0.5, borderRadius: 1,
+                        border: 1,
+                        borderColor: selected3dMolIdx === idx ? "primary.main" : "transparent",
+                        bgcolor: selected3dMolIdx === idx ? "action.selected" : "transparent",
+                        "&:hover": { bgcolor: "action.hover" },
+                      }}
+                    >
+                      <Typography variant="caption" fontWeight={selected3dMolIdx === idx ? 700 : 400}>
+                        #{mol.id}
+                      </Typography>
+                      {mol.mscore != null && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          MScore: {mol.mscore.toFixed(3)}
+                        </Typography>
+                      )}
+                      {mol.mol_similarity != null && (
+                        <Typography variant="caption" color="text.secondary" display="block">
+                          Tan.Sim: {(mol.mol_similarity * 100).toFixed(0)}%
+                        </Typography>
+                      )}
+                    </Box>
+                  ))}
+                </Box>
+
+                {/* Right: 3D viewer */}
+                <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+                  {threeDData && (
+                    <Box sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap" }}>
+                      <Typography variant="body2">
+                        <strong>MCS atoms:</strong> {threeDData.mcs_atoms}&nbsp;&nbsp;
+                        <strong>Best RMSD:</strong> {threeDData.rmsd != null ? `${threeDData.rmsd} Å` : "N/A"}
+                      </Typography>
+                      <FormControlLabel
+                        control={
+                          <Switch size="small" checked={showInputMol3d}
+                            onChange={(e) => setShowInputMol3d(e.target.checked)} color="primary" />
+                        }
+                        label={<Typography variant="body2">Show input molecule</Typography>}
+                      />
+                      <FormControlLabel
+                        control={
+                          <Switch size="small" checked={sideBySide3d}
+                            onChange={(e) => setSideBySide3d(e.target.checked)} color="secondary" />
+                        }
+                        label={<Typography variant="body2">Side-by-Side</Typography>}
+                      />
+                      {sideBySide3d && (
+                        <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 180 }}>
+                          <Typography variant="caption" color="text.secondary" noWrap>Distance:</Typography>
+                          <Slider
+                            size="small"
+                            min={5}
+                            max={40}
+                            step={1}
+                            value={sideBySideDist}
+                            onChange={(_, v) => setSideBySideDist(v as number)}
+                            valueLabelDisplay="auto"
+                            valueLabelFormat={(v) => `${v} Å`}
+                            sx={{ width: 110 }}
+                          />
+                          <Typography variant="caption" color="text.secondary">{sideBySideDist} Å</Typography>
+                        </Box>
+                      )}
+                    </Box>
+                  )}
+                  {threeDLoading && (
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 2 }}>
+                      <CircularProgress size={20} />
+                      <Typography variant="body2" color="text.secondary">
+                        Generating 3D conformers and aligning…
+                      </Typography>
+                    </Box>
+                  )}
+                  {threeDError && <Alert severity="error">{threeDError}</Alert>}
+                  {!threeDLoading && threeDData && (
+                    <iframe
+                      srcDoc={threeDViewerHtml}
+                      style={{ width: "100%", flex: 1, border: "none", borderRadius: 8 }}
+                      title="3D Ligand Comparison Viewer"
+                    />
+                  )}
+                  {!threeDLoading && !threeDData && !threeDError && (
+                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flex: 1, color: "text.secondary" }}>
+                      <Typography variant="body2">← Select a molecule from the list to view its 3D structure</Typography>
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            </AccordionDetails>
+          </Accordion>
+        )}
+
         {/* ---- Protein-Ligand Alignment ---- */}
         {generatedMols.length > 0 && (
           <Accordion sx={{ mt: 3 }} defaultExpanded={false}>
@@ -2860,6 +3310,8 @@ function App() {
           </AccordionDetails>
         </Accordion>
       </Container>
+      )}
+      {activePage === "fragment-search" && <FragmentSearchPage />}
     </ThemeProvider>
     </ErrorBoundary>
   );

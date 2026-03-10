@@ -2,7 +2,7 @@
 FastAPI backend for Morpheus V – molecule fragmentation service.
 """
 
-import os, sys, io, base64, json, asyncio, copy, traceback
+import os, sys, io, base64, json, asyncio, copy, traceback, gzip
 from pathlib import Path
 import requests as _requests
 import httpx as _httpx
@@ -37,6 +37,56 @@ from search_replace import (
 FRAGMENTS_FILE = str(Path(__file__).parent / "data" / "All-In-One.txt.gz")
 DATA_DIR = Path(__file__).parent / "data"
 ALL_FRAGMENT_LIBRARIES: list[str] = sorted(p.name for p in DATA_DIR.glob("*.txt.gz"))
+
+# ============================================================================
+# MSCORE FORMULA
+# MScore = shape_esp * QED^MSCORE_QED_ALPHA
+# alpha=1.0 → equal weight (original); alpha=0.5 → square-root / dampened QED
+# ============================================================================
+MSCORE_QED_ALPHA = 0.5
+
+# In-memory cache: original_smiles -> (mol_with_all_conformers, list_of_conf_ids)
+# Avoids recomputing input-molecule conformers every time a new analog is selected.
+_input_3d_conformer_cache: dict[str, tuple] = {}
+
+# Per-library cache of canonical SMILES (frozenset) for O(1) exact-match lookups.
+# Populated lazily on first use of /fragment-exact-match.
+_lib_canonical_cache: dict[str, frozenset] = {}
+
+
+def _strip_dummy_map_nums(mol: Chem.Mol) -> Chem.Mol:
+    """Return a copy of mol with atom-map numbers removed from all dummy (wildcard) atoms.
+    This makes [*:1], [*:2], [*] etc. all canonicalize to the same SMILES."""
+    mol = Chem.RWMol(mol)
+    for atom in mol.GetAtoms():
+        if atom.GetAtomicNum() == 0:  # dummy / wildcard
+            atom.SetAtomMapNum(0)
+    return mol.GetMol()
+
+
+def _load_lib_canonical(lib_name: str) -> frozenset:
+    """Load all SMILES from a library file and return a frozenset of canonical forms.
+    Dummy-atom map numbers are stripped so [*:1] and [*] are treated identically."""
+    if lib_name in _lib_canonical_cache:
+        return _lib_canonical_cache[lib_name]
+    lib_path = DATA_DIR / lib_name
+    opener = gzip.open if lib_name.endswith(".gz") else open
+    canon_set: set[str] = set()
+    try:
+        with opener(str(lib_path), "rt", encoding="utf-8") as fh:
+            for line in fh:
+                smi = line.strip()
+                if not smi:
+                    continue
+                m = Chem.MolFromSmiles(smi)
+                if m is not None:
+                    m = _strip_dummy_map_nums(m)
+                    canon_set.add(Chem.MolToSmiles(m, canonical=True))
+    except Exception as exc:
+        print(f"Warning: could not load {lib_name}: {exc}", flush=True)
+    result = frozenset(canon_set)
+    _lib_canonical_cache[lib_name] = result
+    return result
 
 # ============================================================================
 # UNDESIRABLE SMARTS PATTERNS (Structural Alerts)
@@ -518,7 +568,7 @@ async def search_and_replace(req: SearchReplaceRequest):
             except:
                 sascore = None
 
-            mscore = round(mol_sim * qed_val, 3) if mol_sim is not None and qed_val is not None else None
+            mscore = round(mol_sim * (qed_val ** MSCORE_QED_ALPHA), 3) if mol_sim is not None and qed_val is not None else None
 
             mol_entry = {
                 "smiles": new_smi,
@@ -608,7 +658,7 @@ async def search_and_replace(req: SearchReplaceRequest):
                         qed_v = generated[_esp_idx].get("qed")
                         if qed_v is not None:
                             generated[_esp_idx]["mscore"] = round(
-                                generated[_esp_idx]["shape_esp"] * float(qed_v), 3
+                                generated[_esp_idx]["shape_esp"] * float(qed_v) ** MSCORE_QED_ALPHA, 3
                             )
                     # Emit per-molecule scoring progress (0.75 → 0.95)
                     _esp_progress = 0.75 + (_esp_k + 1) / _n_esp * 0.20
@@ -635,6 +685,52 @@ def validate_smiles(req: SmilesRequest):
     if mol is None:
         return ValidateResponse(valid=False, error="Invalid SMILES string")
     return ValidateResponse(valid=True, canonical=Chem.MolToSmiles(mol))
+
+
+class SmilesImageResponse(BaseModel):
+    image: str
+    valid: bool
+    error: str | None = None
+
+
+@app.post("/smiles-to-image", response_model=SmilesImageResponse)
+def smiles_to_image(req: SmilesRequest):
+    """Return a high-res 2D depiction of a SMILES as a base64 PNG."""
+    mol = Chem.MolFromSmiles(req.smiles)
+    if mol is None:
+        return SmilesImageResponse(valid=False, image="", error="Invalid SMILES")
+    rdDepictor.Compute2DCoords(mol)
+    return SmilesImageResponse(valid=True, image=mol_to_base64_png(mol, size=(600, 600)))
+
+
+class FragmentExactMatchResponse(BaseModel):
+    found: bool
+    library: str | None = None
+    error: str | None = None
+
+
+@app.post("/fragment-exact-match", response_model=FragmentExactMatchResponse)
+def fragment_exact_match(req: SmilesRequest):
+    """
+    Check whether the given SMILES is present (exact canonical-SMILES match)
+    in any fragment library except All-In-One.txt.gz.
+    Libraries are loaded and cached on first call for fast subsequent lookups.
+    """
+    mol = Chem.MolFromSmiles(req.smiles)
+    if mol is None:
+        return FragmentExactMatchResponse(found=False, error="Invalid SMILES")
+    mol = _strip_dummy_map_nums(mol)
+    query_canon = Chem.MolToSmiles(mol, canonical=True)
+
+    for lib_name in ALL_FRAGMENT_LIBRARIES:
+        if lib_name == "All-In-One.txt.gz":
+            continue
+        canon_set = _load_lib_canonical(lib_name)
+        if query_canon in canon_set:
+            display_name = lib_name.replace(".txt.gz", "")
+            return FragmentExactMatchResponse(found=True, library=display_name)
+
+    return FragmentExactMatchResponse(found=False)
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1019,121 @@ def align_to_ligand(req: AlignRequest):
         "rmsd": round(best_rmsd, 3) if best_rmsd != float('inf') else None,
         "mcs_atoms": mcs.numAtoms,
         "num_conformers": len(cids),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 3D Ligand Comparison – generate aligned 3D conformers for two molecules
+# ---------------------------------------------------------------------------
+class ThreeDCompareRequest(BaseModel):
+    original_smiles: str
+    analog_smiles: str
+
+
+@app.post("/3d-align-comparison")
+def three_d_align_comparison(req: ThreeDCompareRequest):
+    """
+    Generate 3D conformers for the input molecule and an analog, then
+    align them via MCS and return the best-aligned SDF mol blocks so the
+    frontend can render them side-by-side in a 3Dmol.js viewer.
+    Input-molecule conformers are cached by SMILES so they are only
+    computed once per unique input molecule.
+    """
+    mol_input = Chem.MolFromSmiles(req.original_smiles)
+    mol_analog = Chem.MolFromSmiles(req.analog_smiles)
+    if mol_input is None:
+        raise HTTPException(status_code=400, detail="Invalid input SMILES")
+    if mol_analog is None:
+        raise HTTPException(status_code=400, detail="Invalid analog SMILES")
+
+    NUM_CONFS = 25
+
+    def _embed(mol):
+        mol_h = Chem.AddHs(mol)
+        p = rdDistGeom.ETKDGv3()
+        p.randomSeed = 42
+        p.numThreads = 0
+        p.useSmallRingTorsions = True
+        p.useMacrocycleTorsions = True
+        cids = list(rdDistGeom.EmbedMultipleConfs(mol_h, numConfs=NUM_CONFS, params=p))
+        for cid in cids:
+            AllChem.MMFFOptimizeMolecule(mol_h, confId=cid, maxIters=50)
+        return mol_h, cids
+
+    # --- Input molecule: use cache if available, else compute and store ---
+    cache_key = req.original_smiles
+    if cache_key in _input_3d_conformer_cache:
+        mol_input_h, cids_input = _input_3d_conformer_cache[cache_key]
+    else:
+        mol_input_h, cids_input = _embed(mol_input)
+        if cids_input:
+            _input_3d_conformer_cache[cache_key] = (mol_input_h, cids_input)
+
+    # --- Analog molecule: always compute fresh ---
+    mol_analog_h, cids_analog = _embed(mol_analog)
+
+    if not cids_input or not cids_analog:
+        raise HTTPException(status_code=422, detail="Could not generate 3D conformers for one or both molecules")
+
+    mcs = rdFMCS.FindMCS(
+        [Chem.RemoveHs(mol_input_h), Chem.RemoveHs(mol_analog_h)],
+        bondCompare=rdFMCS.BondCompare.CompareAny,
+        atomCompare=rdFMCS.AtomCompare.CompareAny,
+        completeRingsOnly=True,
+        timeout=10,
+    )
+
+    best_rmsd = float("inf")
+    best_input_conf = cids_input[0]
+    best_analog_conf = cids_analog[0]
+
+    if mcs.numAtoms > 0:
+        mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+        if mcs_mol:
+            mol_in_noH = Chem.RemoveHs(mol_input_h)
+            mol_an_noH = Chem.RemoveHs(mol_analog_h)
+            match_input = mol_in_noH.GetSubstructMatch(mcs_mol)
+            match_analog = mol_an_noH.GetSubstructMatch(mcs_mol)
+
+            if match_input and match_analog:
+                def _heavy_to_full(mol_wh):
+                    m = {}
+                    hi = 0
+                    for a in mol_wh.GetAtoms():
+                        if a.GetAtomicNum() != 1:
+                            m[hi] = a.GetIdx()
+                            hi += 1
+                    return m
+
+                h2f_in = _heavy_to_full(mol_input_h)
+                h2f_an = _heavy_to_full(mol_analog_h)
+                atom_map = [
+                    (h2f_an.get(ia, ia), h2f_in.get(ii, ii))
+                    for ia, ii in zip(match_analog, match_input)
+                ]
+
+                for ci in cids_input:
+                    for ca in cids_analog:
+                        try:
+                            r = AllChem.AlignMol(mol_analog_h, mol_input_h,
+                                                 prbCid=ca, refCid=ci, atomMap=atom_map)
+                            if r < best_rmsd:
+                                best_rmsd = r
+                                best_input_conf = ci
+                                best_analog_conf = ca
+                        except Exception:
+                            pass
+
+                if best_rmsd < float("inf"):
+                    AllChem.AlignMol(mol_analog_h, mol_input_h,
+                                     prbCid=best_analog_conf, refCid=best_input_conf,
+                                     atomMap=atom_map)
+
+    return {
+        "mol_block_input": Chem.MolToMolBlock(mol_input_h, confId=best_input_conf),
+        "mol_block_analog": Chem.MolToMolBlock(mol_analog_h, confId=best_analog_conf),
+        "mcs_atoms": mcs.numAtoms if mcs else 0,
+        "rmsd": round(best_rmsd, 3) if best_rmsd != float("inf") else None,
     }
 
 
