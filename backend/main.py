@@ -12,13 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from pydantic import BaseModel
 from rdkit import Chem
-from rdkit.Chem import Descriptors, Crippen, QED, rdDepictor, Draw, AllChem, rdDistGeom, rdFingerprintGenerator, DataStructs, rdMolDescriptors, rdFMCS, rdDetermineBonds
+from rdkit.Chem import Descriptors, Crippen, QED, rdDepictor, Draw, AllChem, rdDistGeom, rdFingerprintGenerator, DataStructs, rdMolDescriptors, rdFMCS, rdDetermineBonds, rdMolAlign
 # Local patched copy of sascorer — uses the modern rdFingerprintGenerator API
 # to avoid the RDKit deprecation warning "please use MorganGenerator".
 import sascorer as _sascorer
 
 try:
-    from espsim import EmbedAlignScore as _EmbedAlignScore
+    from espsim import GetShapeSim as _GetShapeSim, GetEspSim as _GetEspSim
     _ESPSIM_AVAILABLE = True
 except ImportError:
     _ESPSIM_AVAILABLE = False
@@ -260,6 +260,7 @@ class SearchReplaceRequest(BaseModel):
     similarity_threshold: float = 0.3
     top_n: int = 50
     library_names: list[str] = []  # empty = use default ChEMBL file
+    esp_num_confs: int = 10  # conformers per molecule for shape/ESP scoring (low=10, medium=20, high=30)
 
 
 class GeneratedMolecule(BaseModel):
@@ -634,16 +635,51 @@ async def search_and_replace(req: SearchReplaceRequest):
 
             _n_esp = len(_esp_valid_indices)
             if _n_esp > 0:
-                # Score one molecule at a time so we can report per-molecule progress
+                # Embed probe (input) molecule conformers once with ETKDGv3 + fixed seed
+                _esp_prb_params = AllChem.ETKDGv3()
+                _esp_prb_params.randomSeed = 42
+                _esp_prb_params.numThreads = 0
+                _esp_prb_params.useSmallRingTorsions = True
+                _esp_prb_params.useMacrocycleTorsions = True
+                AllChem.EmbedMultipleConfs(prb_mol_esp, req.esp_num_confs, _esp_prb_params)
+                _esp_prb_crippen = rdMolDescriptors._CalcCrippenContribs(prb_mol_esp)
+
                 def _score_one_esp(prb=prb_mol_esp, ref_mol_h=None):
+                    # prb_crippen captured from closure (_esp_prb_crippen)
+                    prb_crippen = _esp_prb_crippen
                     try:
-                        ss, se = _EmbedAlignScore(
-                            prb, [ref_mol_h],
-                            renormalize=True,
-                            prbNumConfs=10,
-                            refNumConfs=10,
-                        )
-                        return (round(float(ss[0]), 4), round(float(se[0]), 4))
+                        # Embed reference conformers with ETKDGv3 + fixed seed
+                        ref_params = AllChem.ETKDGv3()
+                        ref_params.randomSeed = 42
+                        ref_params.numThreads = 0
+                        ref_params.useSmallRingTorsions = True
+                        ref_params.useMacrocycleTorsions = True
+                        AllChem.EmbedMultipleConfs(ref_mol_h, req.esp_num_confs, ref_params)
+                        ref_crippen = rdMolDescriptors._CalcCrippenContribs(ref_mol_h)
+
+                        prb_n = prb.GetNumConformers()
+                        ref_n = ref_mol_h.GetNumConformers()
+                        if prb_n == 0 or ref_n == 0:
+                            return None
+
+                        best_shape = 0.0
+                        best_prb_conf = 0
+                        best_ref_conf = 0
+                        for ref_ci in range(ref_n):
+                            for prb_ci in range(prb_n):
+                                o3a = rdMolAlign.GetCrippenO3A(prb, ref_mol_h, prb_crippen, ref_crippen, prb_ci, ref_ci)
+                                o3a.Align()
+                                shape = _GetShapeSim(prb, ref_mol_h, prb_ci, ref_ci)
+                                if shape > best_shape:
+                                    best_shape = shape
+                                    best_prb_conf = prb_ci
+                                    best_ref_conf = ref_ci
+
+                        # Re-align to best conformer pair before computing ESP
+                        o3a = rdMolAlign.GetCrippenO3A(prb, ref_mol_h, prb_crippen, ref_crippen, best_prb_conf, best_ref_conf)
+                        o3a.Align()
+                        esp = _GetEspSim(prb, ref_mol_h, best_prb_conf, best_ref_conf, renormalize=True)
+                        return (round(float(best_shape), 4), round(float(esp), 4))
                     except Exception as exc:
                         print(f"ESPsim computation failed: {exc}", flush=True)
                         return None
@@ -731,6 +767,62 @@ def fragment_exact_match(req: SmilesRequest):
             return FragmentExactMatchResponse(found=True, library=display_name)
 
     return FragmentExactMatchResponse(found=False)
+
+
+# ---------------------------------------------------------------------------
+# Standalone similar-fragment search
+# ---------------------------------------------------------------------------
+
+class SimilarFragmentsRequest(BaseModel):
+    query_smiles: str
+    similarity_threshold: float = 0.3
+    top_n: int = 50
+    library_names: list[str] = []
+
+
+@app.post("/similar-fragments")
+async def similar_fragments_endpoint(req: SimilarFragmentsRequest):
+    """Return fragments similar to *query_smiles* from the fragment libraries,
+    sorted by Tanimoto similarity descending."""
+    _lib_paths = (
+        [str(DATA_DIR / name) for name in req.library_names if (DATA_DIR / name).exists()]
+        if req.library_names
+        else [FRAGMENTS_FILE]
+    ) or [FRAGMENTS_FILE]
+    _n_libs = len(_lib_paths)
+
+    def _run():
+        _seen: dict[str, tuple[float, int, str]] = {}
+        for _lib_path in _lib_paths:
+            _lib_name = Path(_lib_path).name
+            for _smi, _sim, _na in find_similar_fragments(
+                req.query_smiles,
+                _lib_path,
+                similarity_threshold=req.similarity_threshold,
+                top_n=req.top_n,
+            ):
+                if _smi not in _seen or _sim > _seen[_smi][0]:
+                    _seen[_smi] = (_sim, _na, _lib_name)
+        return sorted(
+            [(_smi, _sim, _na, _lib) for _smi, (_sim, _na, _lib) in _seen.items()],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:req.top_n]
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(None, _run)
+
+    frags = []
+    for smi, sim, _na, lib in results:
+        fm = Chem.MolFromSmiles(smi)
+        img = sr_mol_to_png(fm, size=(300, 300)) if fm else ""
+        frags.append({
+            "smiles": smi,
+            "similarity": round(sim, 4),
+            "image": img,
+            "library": lib,
+        })
+    return {"fragments": frags, "total": len(frags)}
 
 
 # ---------------------------------------------------------------------------
@@ -1046,16 +1138,17 @@ def three_d_align_comparison(req: ThreeDCompareRequest):
     if mol_analog is None:
         raise HTTPException(status_code=400, detail="Invalid analog SMILES")
 
-    NUM_CONFS = 25
+    NUM_CONFS_INPUT = 35
+    NUM_CONFS_ANALOG = 50
 
-    def _embed(mol):
+    def _embed(mol, num_confs):
         mol_h = Chem.AddHs(mol)
         p = rdDistGeom.ETKDGv3()
         p.randomSeed = 42
         p.numThreads = 0
         p.useSmallRingTorsions = True
         p.useMacrocycleTorsions = True
-        cids = list(rdDistGeom.EmbedMultipleConfs(mol_h, numConfs=NUM_CONFS, params=p))
+        cids = list(rdDistGeom.EmbedMultipleConfs(mol_h, numConfs=num_confs, params=p))
         for cid in cids:
             AllChem.MMFFOptimizeMolecule(mol_h, confId=cid, maxIters=50)
         return mol_h, cids
@@ -1063,14 +1156,15 @@ def three_d_align_comparison(req: ThreeDCompareRequest):
     # --- Input molecule: use cache if available, else compute and store ---
     cache_key = req.original_smiles
     if cache_key in _input_3d_conformer_cache:
-        mol_input_h, cids_input = _input_3d_conformer_cache[cache_key]
+        mol_input_h, cids_input, canonical_conf_id = _input_3d_conformer_cache[cache_key]
     else:
-        mol_input_h, cids_input = _embed(mol_input)
+        mol_input_h, cids_input = _embed(mol_input, NUM_CONFS_INPUT)
+        canonical_conf_id = None
         if cids_input:
-            _input_3d_conformer_cache[cache_key] = (mol_input_h, cids_input)
+            _input_3d_conformer_cache[cache_key] = (mol_input_h, cids_input, None)
 
     # --- Analog molecule: always compute fresh ---
-    mol_analog_h, cids_analog = _embed(mol_analog)
+    mol_analog_h, cids_analog = _embed(mol_analog, NUM_CONFS_ANALOG)
 
     if not cids_input or not cids_analog:
         raise HTTPException(status_code=422, detail="Could not generate 3D conformers for one or both molecules")
@@ -1112,22 +1206,41 @@ def three_d_align_comparison(req: ThreeDCompareRequest):
                     for ia, ii in zip(match_analog, match_input)
                 ]
 
-                for ci in cids_input:
+                if canonical_conf_id is not None:
+                    # Input conformer is fixed; only search over analog conformers
+                    best_input_conf = canonical_conf_id
                     for ca in cids_analog:
                         try:
                             r = AllChem.AlignMol(mol_analog_h, mol_input_h,
-                                                 prbCid=ca, refCid=ci, atomMap=atom_map)
+                                                 prbCid=ca, refCid=canonical_conf_id,
+                                                 atomMap=atom_map)
                             if r < best_rmsd:
                                 best_rmsd = r
-                                best_input_conf = ci
                                 best_analog_conf = ca
                         except Exception:
                             pass
+                else:
+                    # First-time use: joint search over all input × analog conformer pairs
+                    for ci in cids_input:
+                        for ca in cids_analog:
+                            try:
+                                r = AllChem.AlignMol(mol_analog_h, mol_input_h,
+                                                     prbCid=ca, refCid=ci, atomMap=atom_map)
+                                if r < best_rmsd:
+                                    best_rmsd = r
+                                    best_input_conf = ci
+                                    best_analog_conf = ca
+                            except Exception:
+                                pass
 
                 if best_rmsd < float("inf"):
                     AllChem.AlignMol(mol_analog_h, mol_input_h,
                                      prbCid=best_analog_conf, refCid=best_input_conf,
                                      atomMap=atom_map)
+
+    # On first use, store the chosen input conformer as canonical for this SMILES
+    if canonical_conf_id is None and cids_input:
+        _input_3d_conformer_cache[cache_key] = (mol_input_h, cids_input, best_input_conf)
 
     return {
         "mol_block_input": Chem.MolToMolBlock(mol_input_h, confId=best_input_conf),

@@ -64,6 +64,8 @@ import InfoOutlinedIcon from "@mui/icons-material/InfoOutlined";
 import MenuIcon from "@mui/icons-material/Menu";
 import HomeIcon from "@mui/icons-material/Home";
 import YardIcon from "@mui/icons-material/Yard";
+import FullscreenIcon from "@mui/icons-material/Fullscreen";
+import FullscreenExitIcon from "@mui/icons-material/FullscreenExit";
 import axios from "axios";
 import Plot from "react-plotly.js";
 import ErrorBoundary from "./ErrorBoundary";
@@ -335,6 +337,8 @@ const DESCRIPTOR_KEYS: { key: string; label: string }[] = [
 // ---------------------------------------------------------------------------
 const _DEFAULT_FRAG_SMILES = "[*:1]C1=C([*:2])N2N=CN=C2S1";
 
+const ANALOG_COLORS = ['#e74c3c', '#2ecc71', '#e67e22', '#9b59b6', '#1abc9c', '#f1c40f', '#e91e63', '#00bcd4'];
+
 function FragmentSearchPage() {
   const [smiles, setSmiles] = useState(_DEFAULT_FRAG_SMILES);
   const [image, setImage] = useState<string | null>(null);
@@ -342,6 +346,21 @@ function FragmentSearchPage() {
   const [imgLoading, setImgLoading] = useState(false);
   const [matchResult, setMatchResult] = useState<{ found: boolean; library?: string | null } | null>(null);
   const [matchLoading, setMatchLoading] = useState(false);
+  const [showSimilarToggle, setShowSimilarToggle] = useState(false);
+  const [similarFrags, setSimilarFrags] = useState<SimilarFragment[]>([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [availableLibs, setAvailableLibs] = useState<string[]>([]);
+
+  // Fetch library list once on mount
+  useEffect(() => {
+    fetch(`${API_URL}/fragment-libraries`)
+      .then((r) => r.json())
+      .then((data) => {
+        const libs: string[] = (data.libraries ?? []).filter((l: string) => l !== "All-In-One.txt.gz");
+        setAvailableLibs(libs);
+      })
+      .catch(() => {});
+  }, []);
 
   // Fetch 2D image whenever smiles changes (debounced 400 ms) — no search yet
   useEffect(() => {
@@ -368,6 +387,43 @@ function FragmentSearchPage() {
     }, 400);
     return () => clearTimeout(t);
   }, [smiles]);
+
+  // Reset toggle+results when SMILES changes
+  const handleSmilesChange = (val: string) => {
+    setSmiles(val);
+    setMatchResult(null);
+    setShowSimilarToggle(false);
+    setSimilarFrags([]);
+  };
+
+  // Fetch similar fragments when toggle is turned on
+  useEffect(() => {
+    if (!showSimilarToggle || !smiles.trim() || !!imgError) {
+      setSimilarFrags([]);
+      return;
+    }
+    let cancelled = false;
+    setSimilarLoading(true);
+    setSimilarFrags([]);
+    axios
+      .post(`${API_URL}/similar-fragments`, {
+        query_smiles: smiles,
+        similarity_threshold: 0.3,
+        top_n: 50,
+        library_names: availableLibs,
+      })
+      .then((res) => {
+        if (!cancelled) {
+          const frags: SimilarFragment[] = (res.data.fragments ?? []).slice().sort(
+            (a: SimilarFragment, b: SimilarFragment) => b.similarity - a.similarity
+          );
+          setSimilarFrags(frags);
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setSimilarLoading(false); });
+    return () => { cancelled = true; };
+  }, [showSimilarToggle, smiles, imgError, availableLibs]);
 
   // Search handler — triggered by button press only
   const handleSearch = useCallback(async () => {
@@ -434,7 +490,7 @@ function FragmentSearchPage() {
         fullWidth
         label="SMILES"
         value={smiles}
-        onChange={(e) => { setSmiles(e.target.value); setMatchResult(null); }}
+        onChange={(e) => { handleSmilesChange(e.target.value); }}
         placeholder="Enter SMILES string"
         variant="outlined"
         error={!!imgError}
@@ -469,6 +525,89 @@ function FragmentSearchPage() {
           )}
         </Box>
       )}
+
+      {/* Show similar fragments toggle */}
+      {matchResult !== null && !imgError && (
+        <Box sx={{ mt: 2 }}>
+          <Box sx={{ display: "flex", justifyContent: "center" }}>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={showSimilarToggle}
+                  onChange={(e) => setShowSimilarToggle(e.target.checked)}
+                  size="small"
+                />
+              }
+              label={
+                <Typography variant="body2" fontWeight={600}>
+                  Show similar fragments
+                </Typography>
+              }
+            />
+          </Box>
+
+          {showSimilarToggle && (
+            <Box sx={{ mt: 1.5 }}>
+              {similarLoading && (
+                <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 1, py: 1 }}>
+                  <CircularProgress size={18} />
+                  <Typography variant="body2" color="text.secondary">Searching fragment libraries…</Typography>
+                </Box>
+              )}
+              {!similarLoading && similarFrags.length === 0 && (
+                <Alert severity="info">No similar fragments found (threshold: 0.30).</Alert>
+              )}
+              {!similarLoading && similarFrags.length > 0 && (
+                <>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 1, textAlign: "center" }}>
+                    {similarFrags.length} similar fragment{similarFrags.length !== 1 ? "s" : ""} found, sorted by Tanimoto similarity.
+                  </Typography>
+                  <Grid container spacing={1.5}>
+                    {similarFrags.map((frag, i) => {
+                      const libDisplay =
+                        frag.library === "All-In-One.txt.gz"
+                          ? "All-in-One"
+                          : frag.library.replace(/\.txt\.gz$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
+                      return (
+                        <Grid size={{ xs: 6, sm: 4, md: 3, lg: 2 }} key={i}>
+                          <Card variant="outlined" sx={{ height: "100%" }}>
+                            <CardMedia
+                              component="img"
+                              image={`data:image/png;base64,${frag.image}`}
+                              alt={frag.smiles}
+                              sx={{ p: 0.5, imageRendering: "-webkit-optimize-contrast" }}
+                            />
+                            <CardContent sx={{ py: 0.5, px: 1, textAlign: "center", "&:last-child": { pb: 0.8 } }}>
+                              <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "primary.main", mb: 0.2 }}>
+                                Tanimoto: {(frag.similarity * 100).toFixed(1)}%
+                              </Typography>
+                              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.2 }}>
+                                {libDisplay}
+                              </Typography>
+                              <Tooltip title={frag.smiles} placement="bottom" arrow>
+                                <Typography variant="caption" display="block" sx={{
+                                  fontSize: 9.5,
+                                  color: "text.secondary",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  cursor: "default",
+                                }}>
+                                  {frag.smiles}
+                                </Typography>
+                              </Tooltip>
+                            </CardContent>
+                          </Card>
+                        </Grid>
+                      );
+                    })}
+                  </Grid>
+                </>
+              )}
+            </Box>
+          )}
+        </Box>
+      )}
     </Container>
   );
 }
@@ -491,6 +630,7 @@ function App() {
   // Search & Replace state
   const [simThreshold, setSimThreshold] = useState(0.3);
   const [maxResults, setMaxResults] = useState(200);
+  const [espConformers, setEspConformers] = useState<"low" | "medium" | "high">("low");
   const [searching, setSearching] = useState(false);
   const [searchProgress, setSearchProgress] = useState(0);
   const [searchStage, setSearchStage] = useState<string>("searching");
@@ -538,13 +678,13 @@ function App() {
   const [bgColor, setBgColor] = useState("#ffffff");
 
   // 3D Ligand Comparison state
-  const [selected3dMolIdx, setSelected3dMolIdx] = useState(0);
-  const [threeDData, setThreeDData] = useState<ThreeDCompareData | null>(null);
-  const [threeDLoading, setThreeDLoading] = useState(false);
+  const [threeDDataList, setThreeDDataList] = useState<{molIdx: number; data: ThreeDCompareData}[]>([]);
+  const [threeDLoadingIdx, setThreeDLoadingIdx] = useState<number | null>(null);
   const [threeDError, setThreeDError] = useState<string | null>(null);
   const [showInputMol3d, setShowInputMol3d] = useState(true);
   const [sideBySide3d, setSideBySide3d] = useState(false);
   const [sideBySideDist, setSideBySideDist] = useState(15);
+  const [viewer3dFullscreen, setViewer3dFullscreen] = useState(false);
 
   // Retrosynthetic Planning state
   const [retroSelectedSmiles, setRetroSelectedSmiles] = useState<string>("");
@@ -640,9 +780,9 @@ function App() {
     setShowAllMols(false);
     setShowFragHighlight(false);
     setRecoloredImages(new Map());
-    setThreeDData(null);
+    setThreeDDataList([]);
+    setThreeDLoadingIdx(null);
     setThreeDError(null);
-    setSelected3dMolIdx(0);
     setSideBySide3d(false);
     setSideBySideDist(15);
     setLegendCols(["mscore", "mol_similarity", "qed"]);
@@ -814,9 +954,9 @@ function App() {
     setShowAllMols(false);
     setShowFragHighlight(false);
     setRecoloredImages(new Map());
-    setThreeDData(null);
+    setThreeDDataList([]);
+    setThreeDLoadingIdx(null);
     setThreeDError(null);
-    setSelected3dMolIdx(0);
     setSideBySide3d(false);
     setSideBySideDist(15);
     setLegendCols(["mscore", "mol_similarity", "qed"]);
@@ -835,6 +975,7 @@ function App() {
         similarity_threshold: simThreshold,
         top_n: maxResults,
         library_names: [...selectedLibraries],
+        esp_num_confs: espConformers === "low" ? 10 : espConformers === "medium" ? 20 : 30,
       };
 
       const resp = await fetch(`${API_URL}/search-replace`, {
@@ -1126,93 +1267,122 @@ function App() {
   }, [pdbInfo, bgColor, alignmentResult]);
 
   // --- 3D Ligand comparison ---
-  const fetch3DComparison = useCallback(async (analogSmiles: string) => {
+  // --- 3D Ligand comparison (multi-molecule) ---
+  const handleMol3dToggle = useCallback(async (mol: GeneratedMolecule, molIdx: number) => {
+    if (threeDDataList.some((e) => e.molIdx === molIdx)) {
+      setThreeDDataList((prev) => prev.filter((e) => e.molIdx !== molIdx));
+      return;
+    }
     if (!smilesInput) return;
-    setThreeDLoading(true);
+    setThreeDLoadingIdx(molIdx);
     setThreeDError(null);
-    setThreeDData(null);
     try {
       const resp = await axios.post<ThreeDCompareData>(`${API_URL}/3d-align-comparison`, {
         original_smiles: smilesInput,
-        analog_smiles: analogSmiles,
+        analog_smiles: mol.smiles,
       });
-      setThreeDData(resp.data);
+      setThreeDDataList((prev) => [...prev, { molIdx, data: resp.data }]);
     } catch (e: any) {
       setThreeDError(e?.response?.data?.detail ?? e?.message ?? "Failed to generate 3D view");
     } finally {
-      setThreeDLoading(false);
+      setThreeDLoadingIdx(null);
     }
-  }, [smilesInput]);
+  }, [smilesInput, threeDDataList]);
 
   const threeDViewerHtml = useMemo(() => {
-    if (!threeDData) return "";
-    const analogMol = generatedMols[selected3dMolIdx];
-    const analogLabel = analogMol ? `Analog #${analogMol.id}` : `Analog #${selected3dMolIdx + 1}`;
-    const inputSdJSON = JSON.stringify(threeDData.mol_block_input);
-    const analogSdJSON = JSON.stringify(threeDData.mol_block_analog);
-    // Polar-H helper: atoms within 1.3 Å of N, O or S
-    const polarHSel = (model: number) =>
-      `{model:${model},elem:'H',within:{distance:1.3,sel:{model:${model},elem:['N','O','S']}}}`;
-    const heavySel = (model: number) => `{model:${model},not:{elem:'H'}}`;
+    if (threeDDataList.length === 0) return "";
 
-    // JS helper embedded in HTML to shift X-coords of an SDF mol block
+    // JS helper embedded in HTML to shift X and Y coords of an SDF mol block
     const shiftFn = `
-    function shiftMolBlockX(mb, dx) {
+    function shiftMolBlock(mb, dx, dy) {
       var lines = mb.split('\\n');
       var n = parseInt(lines[3].substring(0,3).trim());
       for (var i=4; i<4+n; i++) {
         if (!lines[i]) continue;
         var x = parseFloat(lines[i].substring(0,10)) + dx;
+        var y = parseFloat(lines[i].substring(10,20)) + dy;
         var xs = x.toFixed(4); while(xs.length<10) xs=' '+xs;
-        lines[i] = xs + lines[i].substring(10);
+        var ys = y.toFixed(4); while(ys.length<10) ys=' '+ys;
+        lines[i] = xs + ys + lines[i].substring(20);
       }
       return lines.join('\\n');
     }`;
 
-    // When side-by-side: add both models with analog shifted by sideBySideDist Å in X
-    const analogLoadExpr = sideBySide3d
-      ? `shiftMolBlockX(${analogSdJSON}, ${sideBySideDist})`
-      : analogSdJSON;
+    const inputSdJSON = JSON.stringify(threeDDataList[0].data.mol_block_input);
+    const inputScheme = `{'C':'#3498db','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'}`;
 
-    const inputStyle = showInputMol3d
-      ? [
-          `viewer.addModel(${inputSdJSON},'sdf');`,
-          `viewer.addModel(${analogLoadExpr},'sdf');`,
-          `viewer.setStyle({},{});`,
-          // input heavy atoms
-          `viewer.addStyle(${heavySel(0)},{stick:{radius:0.2,colorscheme:{prop:'elem',map:inputScheme}}});`,
-          // input polar H
-          `viewer.addStyle(${polarHSel(0)},{stick:{radius:0.08,colorscheme:{prop:'elem',map:inputScheme}}});`,
-          // analog heavy atoms
-          `viewer.addStyle(${heavySel(1)},{stick:{radius:0.15,colorscheme:{prop:'elem',map:analogScheme}}});`,
-          // analog polar H
-          `viewer.addStyle(${polarHSel(1)},{stick:{radius:0.06,colorscheme:{prop:'elem',map:analogScheme}}});`,
-        ].join("\n    ")
-      : [
-          `viewer.addModel(${analogLoadExpr},'sdf');`,
-          `viewer.setStyle({},{});`,
-          `viewer.addStyle({not:{elem:'H'}},{stick:{radius:0.2,colorscheme:{prop:'elem',map:analogScheme}}});`,
-          `viewer.addStyle({elem:'H',within:{distance:1.3,sel:{elem:['N','O','S']}}},{stick:{radius:0.08,colorscheme:{prop:'elem',map:analogScheme}}});`,
-        ].join("\n    ");
+    const polarHSel = (model: number) =>
+      `{model:${model},elem:'H',within:{distance:1.3,sel:{model:${model},elem:['N','O','S']}}}`;
+    const heavySel = (model: number) => `{model:${model},not:{elem:'H'}}`;
+
+    let addModelLines: string[] = [];
+    let addStyleLines: string[] = [];
+    let legendItems = "";
+    let modelOffset = 0;
+
+    if (showInputMol3d) {
+      addModelLines.push(`viewer.addModel(${inputSdJSON},'sdf');`);
+      addStyleLines.push(`viewer.addStyle(${heavySel(0)},{stick:{radius:0.2,colorscheme:{prop:'elem',map:${inputScheme}}}});`);
+      addStyleLines.push(`viewer.addStyle(${polarHSel(0)},{stick:{radius:0.08,colorscheme:{prop:'elem',map:${inputScheme}}}});`);
+      legendItems += `<span style="display:inline-block;width:12px;height:12px;background:#3498db;margin-right:4px;vertical-align:middle;border-radius:2px;"></span><strong style="color:#3498db;">Input</strong>&nbsp;&nbsp;`;
+      modelOffset = 1;
+    }
+
+    threeDDataList.forEach((entry, i) => {
+      const color = ANALOG_COLORS[i % ANALOG_COLORS.length];
+      const analogMol = generatedMols[entry.molIdx];
+      const label = analogMol ? `#${analogMol.id}` : `#${entry.molIdx + 1}`;
+      const analogSdJSON = JSON.stringify(entry.data.mol_block_analog);
+      const modelIdx = modelOffset + i;
+      const analogScheme = `{'C':'${color}','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'}`;
+
+      let loadExpr: string;
+      if (sideBySide3d) {
+        // Layout: row 0 holds up to 4 analogs (offset right of input if shown).
+        // From the 5th analog onward, wrap into new rows below the input position.
+        let row: number, col: number;
+        if (i < 4) {
+          row = 0;
+          col = i + modelOffset; // shift right past input in row 0
+        } else {
+          const adjusted = i - 4;
+          row = 1 + Math.floor(adjusted / 4);
+          col = adjusted % 4; // new rows start at same X as input (col 0)
+        }
+        const dx = col * sideBySideDist;
+        const dy = -row * sideBySideDist;
+        loadExpr = `shiftMolBlock(${analogSdJSON}, ${dx}, ${dy})`;
+      } else {
+        loadExpr = analogSdJSON;
+      }
+
+      addModelLines.push(`viewer.addModel(${loadExpr},'sdf');`);
+      addStyleLines.push(`viewer.addStyle(${heavySel(modelIdx)},{stick:{radius:0.15,colorscheme:{prop:'elem',map:${analogScheme}}}});`);
+      addStyleLines.push(`viewer.addStyle(${polarHSel(modelIdx)},{stick:{radius:0.06,colorscheme:{prop:'elem',map:${analogScheme}}}});`);
+
+      legendItems += `<span style="display:inline-block;width:12px;height:12px;background:${color};margin-right:4px;vertical-align:middle;border-radius:2px;"></span><strong style="color:${color};">Analog ${label}</strong>&nbsp;&nbsp;`;
+    });
+
+    const allLines = [
+      ...addModelLines,
+      `viewer.setStyle({},{});`,
+      ...addStyleLines,
+    ];
+
     return `<!DOCTYPE html><html><head>
   <script src="https://3Dmol.csb.pitt.edu/build/3Dmol-min.js"><\/script>
   <style>body{margin:0;padding:0;font-family:sans-serif;background:#fff}</style>
 </head><body>
-  <div style="padding:6px 8px 2px;font-size:12px;">
-    ${showInputMol3d ? `<span style="display:inline-block;width:12px;height:12px;background:#3498db;margin-right:4px;vertical-align:middle;"></span><strong style="color:#3498db;">Input (blue C)</strong>&nbsp;&nbsp;` : ''}
-    <span style="display:inline-block;width:12px;height:12px;background:#e74c3c;margin-right:4px;vertical-align:middle;"></span><strong style="color:#e74c3c;">${analogLabel} (red C)</strong>
-  </div>
+  <div style="padding:6px 8px 2px;font-size:12px;flex-wrap:wrap;">${legendItems}</div>
   <div id="v3d" style="width:100%;height:490px;position:relative;"></div>
   <script>
     ${shiftFn}
-    var inputScheme={'C':'#3498db','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'};
-    var analogScheme={'C':'#e74c3c','N':'#3050F8','O':'#FF0D0D','S':'#FFFF30','F':'#90E050','Cl':'#1FF01F','Br':'#A62929','I':'#940094','H':'#FFFFFF','P':'#FF8000'};
     var viewer=$3Dmol.createViewer('v3d',{backgroundColor:'white'});
-    ${inputStyle}
+    ${allLines.join("\n    ")}
     viewer.zoomTo();viewer.render();
   <\/script>
 </body></html>`;
-  }, [threeDData, showInputMol3d, sideBySide3d, sideBySideDist, selected3dMolIdx, generatedMols]);
+  }, [threeDDataList, showInputMol3d, sideBySide3d, sideBySideDist, generatedMols]);
 
   const fragTypeColor = (t: string) => {
     switch (t) {
@@ -1611,6 +1781,7 @@ function App() {
                 Please select a fragment above before searching.
               </Alert>
             )}
+
           </Paper>
 
           {/* ---- Search & Replace Section ---- */}
@@ -1663,6 +1834,48 @@ function App() {
                   valueLabelDisplay="auto"
                   size="small"
                 />
+              </Box>
+            </Box>
+
+            {/* ESP Conformer Quality */}
+            <Box sx={{ mb: 2 }}>
+              <Box sx={{ display: "flex", alignItems: "center", gap: 0.5, mb: 0.5 }}>
+                <Typography variant="body2" fontWeight={600}>3D Scoring Quality</Typography>
+                <Tooltip title="Controls how many 3D conformers are generated per molecule when computing shape and ESP similarity. More conformers improve accuracy but increase computation time." arrow>
+                  <InfoOutlinedIcon sx={{ fontSize: 15, color: "text.secondary", cursor: "help" }} />
+                </Tooltip>
+              </Box>
+              <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
+                {(["low", "medium", "high"] as const).map((level) => {
+                  const info = {
+                    low:    { label: "Low",    confs: 10, tip: "10 conformers per molecule. Fast — good for initial exploration." },
+                    medium: { label: "Medium", confs: 20, tip: "20 conformers per molecule. Balanced accuracy and speed." },
+                    high:   { label: "High",   confs: 30, tip: "30 conformers per molecule. Slower but more reliable shape/ESP scores." },
+                  }[level];
+                  return (
+                    <Tooltip key={level} title={info.tip} arrow>
+                      <Box
+                        onClick={() => setEspConformers(level)}
+                        sx={{
+                          cursor: "pointer",
+                          px: 1.5, py: 0.5,
+                          borderRadius: 2,
+                          border: 2,
+                          borderColor: espConformers === level ? "primary.main" : "divider",
+                          bgcolor: espConformers === level ? "primary.main" : "transparent",
+                          color: espConformers === level ? "primary.contrastText" : "text.primary",
+                          display: "flex", alignItems: "center", gap: 0.75,
+                          userSelect: "none",
+                          transition: "all 0.15s",
+                          "&:hover": { borderColor: "primary.main" },
+                        }}
+                      >
+                        <Typography variant="body2" fontWeight={600}>{info.label}</Typography>
+                        <Typography variant="caption" sx={{ opacity: 0.8 }}>({info.confs})</Typography>
+                      </Box>
+                    </Tooltip>
+                  );
+                })}
               </Box>
             </Box>
 
@@ -2462,7 +2675,6 @@ function App() {
                           </AccordionSummary>
                           <AccordionDetails sx={{ pt: 1 }}>
                             {(() => {
-                              // Map fragment SMILES → generated mol ID (or "rejected")
                               const fragToMolId: Record<string, number> = {};
                               generatedMols.forEach((m) => {
                                 if (m.new_fragment_smiles) fragToMolId[m.new_fragment_smiles] = m.id;
@@ -2471,61 +2683,61 @@ function App() {
                                 rejectedMols.map((m) => m.new_fragment_smiles).filter(Boolean)
                               );
                               return (
-                            <Grid container spacing={1.5} columns={6}>
-                              {similarFragments.map((frag, i) => {
-                                const libDisplay =
-                                  frag.library === "All-In-One.txt.gz"
-                                    ? "All-in-One"
-                                    : frag.library.replace(/\.txt\.gz$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
-                                const molId = fragToMolId[frag.smiles];
-                                const isRejected = rejectedSmiles.has(frag.smiles);
-                                return (
-                                  <Grid size={1} key={i}>
-                                    <Card variant="outlined" sx={{ height: "100%" }}>
-                                      <CardMedia
-                                        component="img"
-                                        image={`data:image/png;base64,${frag.image}`}
-                                        alt={frag.smiles}
-                                        sx={{ p: 0.5, imageRendering: "-webkit-optimize-contrast" }}
-                                      />
-                                      <CardContent sx={{ py: 0.5, px: 1, textAlign: "center", "&:last-child": { pb: 0.8 } }}>
-                                        {molId != null ? (
-                                          <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "primary.main", mb: 0.2 }}>
-                                            Mol #{molId}
-                                          </Typography>
-                                        ) : isRejected ? (
-                                          <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "error.main", mb: 0.2 }}>
-                                            Rejected
-                                          </Typography>
-                                        ) : (
-                                          <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "text.disabled", mb: 0.2 }}>
-                                            No molecule
-                                          </Typography>
-                                        )}
-                                        <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "text.secondary", mb: 0.2 }}>
-                                          Tanimoto Sim: {(frag.similarity * 100).toFixed(1)}%
-                                        </Typography>
-                                        <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.2 }}>
-                                          Library: {libDisplay}
-                                        </Typography>
-                                        <Tooltip title={frag.smiles} placement="bottom" arrow>
-                                          <Typography variant="caption" display="block" sx={{
-                                            fontSize: 9.5,
-                                            color: "text.secondary",
-                                            overflow: "hidden",
-                                            textOverflow: "ellipsis",
-                                            whiteSpace: "nowrap",
-                                            cursor: "default",
-                                          }}>
-                                            {frag.smiles}
-                                          </Typography>
-                                        </Tooltip>
-                                      </CardContent>
-                                    </Card>
-                                  </Grid>
-                                );
-                              })}
-                            </Grid>
+                                <Grid container spacing={1.5} columns={6}>
+                                  {similarFragments.map((frag, i) => {
+                                    const libDisplay =
+                                      frag.library === "All-In-One.txt.gz"
+                                        ? "All-in-One"
+                                        : frag.library.replace(/\.txt\.gz$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
+                                    const molId = fragToMolId[frag.smiles];
+                                    const isRejected = rejectedSmiles.has(frag.smiles);
+                                    return (
+                                      <Grid size={1} key={i}>
+                                        <Card variant="outlined" sx={{ height: "100%" }}>
+                                          <CardMedia
+                                            component="img"
+                                            image={`data:image/png;base64,${frag.image}`}
+                                            alt={frag.smiles}
+                                            sx={{ p: 0.5, imageRendering: "-webkit-optimize-contrast" }}
+                                          />
+                                          <CardContent sx={{ py: 0.5, px: 1, textAlign: "center", "&:last-child": { pb: 0.8 } }}>
+                                            {molId != null ? (
+                                              <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "primary.main", mb: 0.2 }}>
+                                                Mol #{molId}
+                                              </Typography>
+                                            ) : isRejected ? (
+                                              <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "error.main", mb: 0.2 }}>
+                                                Rejected
+                                              </Typography>
+                                            ) : (
+                                              <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "text.disabled", mb: 0.2 }}>
+                                                No molecule
+                                              </Typography>
+                                            )}
+                                            <Typography variant="caption" display="block" sx={{ fontWeight: 700, color: "text.secondary", mb: 0.2 }}>
+                                              Tanimoto Sim: {(frag.similarity * 100).toFixed(1)}%
+                                            </Typography>
+                                            <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 0.2 }}>
+                                              Library: {libDisplay}
+                                            </Typography>
+                                            <Tooltip title={frag.smiles} placement="bottom" arrow>
+                                              <Typography variant="caption" display="block" sx={{
+                                                fontSize: 9.5,
+                                                color: "text.secondary",
+                                                overflow: "hidden",
+                                                textOverflow: "ellipsis",
+                                                whiteSpace: "nowrap",
+                                                cursor: "default",
+                                              }}>
+                                                {frag.smiles}
+                                              </Typography>
+                                            </Tooltip>
+                                          </CardContent>
+                                        </Card>
+                                      </Grid>
+                                    );
+                                  })}
+                                </Grid>
                               );
                             })()}
                           </AccordionDetails>
@@ -2554,6 +2766,7 @@ function App() {
 
         {/* ---- 3D Ligand ---- */}
         {generatedMols.length > 0 && (
+          <>
           <Accordion sx={{ mt: 3 }} defaultExpanded={false}>
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
               <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 1, width: "100%" }}>
@@ -2563,51 +2776,68 @@ function App() {
             </AccordionSummary>
             <AccordionDetails>
               <Typography variant="body2" color="text.secondary" sx={{ mb: 2, textAlign: "center" }}>
-                Select a generated molecule to compare its 3D structure with the input molecule.
+                Click a molecule to add it to the 3D view. Click again to remove it.
               </Typography>
               <Box sx={{ display: "flex", gap: 2, height: 560 }}>
                 {/* Left: molecule selector */}
                 <Box sx={{ width: 210, flexShrink: 0, overflowY: "auto", border: 1, borderColor: "divider", borderRadius: 2, p: 1 }}>
                   <Typography variant="caption" fontWeight={700} color="text.secondary" sx={{ px: 0.5, mb: 0.5, display: "block" }}>
-                    Select molecule
+                    Click to toggle
                   </Typography>
-                  {generatedMols.map((mol, idx) => (
-                    <Box
-                      key={mol.id}
-                      onClick={() => { setSelected3dMolIdx(idx); fetch3DComparison(mol.smiles); }}
-                      sx={{
-                        cursor: "pointer", p: 0.75, mb: 0.5, borderRadius: 1,
-                        border: 1,
-                        borderColor: selected3dMolIdx === idx ? "primary.main" : "transparent",
-                        bgcolor: selected3dMolIdx === idx ? "action.selected" : "transparent",
-                        "&:hover": { bgcolor: "action.hover" },
-                      }}
-                    >
-                      <Typography variant="caption" fontWeight={selected3dMolIdx === idx ? 700 : 400}>
-                        #{mol.id}
-                      </Typography>
-                      {mol.mscore != null && (
-                        <Typography variant="caption" color="text.secondary" display="block">
-                          MScore: {mol.mscore.toFixed(3)}
-                        </Typography>
-                      )}
-                      {mol.mol_similarity != null && (
-                        <Typography variant="caption" color="text.secondary" display="block">
-                          Tan.Sim: {(mol.mol_similarity * 100).toFixed(0)}%
-                        </Typography>
-                      )}
-                    </Box>
-                  ))}
+                  {generatedMols.map((mol, idx) => {
+                    const entryIdx = threeDDataList.findIndex((e) => e.molIdx === idx);
+                    const isSelected = entryIdx !== -1;
+                    const color = isSelected ? ANALOG_COLORS[entryIdx % ANALOG_COLORS.length] : undefined;
+                    const isLoading = threeDLoadingIdx === idx;
+                    return (
+                      <Box
+                        key={mol.id}
+                        onClick={() => handleMol3dToggle(mol, idx)}
+                        sx={{
+                          cursor: "pointer", p: 0.75, mb: 0.5, borderRadius: 1,
+                          border: 1,
+                          borderColor: isSelected ? color ?? "primary.main" : "transparent",
+                          bgcolor: isSelected ? "action.selected" : "transparent",
+                          "&:hover": { bgcolor: "action.hover" },
+                          display: "flex", alignItems: "flex-start", gap: 0.5,
+                        }}
+                      >
+                        <Box sx={{ mt: 0.3, flexShrink: 0 }}>
+                          {isLoading ? (
+                            <CircularProgress size={12} />
+                          ) : (
+                            <Box sx={{ width: 12, height: 12, borderRadius: "2px", bgcolor: isSelected ? color : "transparent", border: 1, borderColor: isSelected ? color ?? "transparent" : "text.disabled" }} />
+                          )}
+                        </Box>
+                        <Box>
+                          <Typography variant="caption" fontWeight={isSelected ? 700 : 400} sx={{ color: isSelected ? color : "inherit" }}>
+                            #{mol.id}
+                          </Typography>
+                          {mol.mscore != null && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              MScore: {mol.mscore.toFixed(3)}
+                            </Typography>
+                          )}
+                          {mol.mol_similarity != null && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              Tan.Sim: {(mol.mol_similarity * 100).toFixed(0)}%
+                            </Typography>
+                          )}
+                          {isSelected && threeDDataList[entryIdx] && (
+                            <Typography variant="caption" color="text.secondary" display="block">
+                              MCS: {threeDDataList[entryIdx].data.mcs_atoms} | RMSD: {threeDDataList[entryIdx].data.rmsd != null ? `${threeDDataList[entryIdx].data.rmsd} Å` : "N/A"}
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    );
+                  })}
                 </Box>
 
                 {/* Right: 3D viewer */}
                 <Box sx={{ flex: 1, display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-                  {threeDData && (
+                  {threeDDataList.length > 0 && (
                     <Box sx={{ display: "flex", gap: 2, alignItems: "center", flexWrap: "wrap" }}>
-                      <Typography variant="body2">
-                        <strong>MCS atoms:</strong> {threeDData.mcs_atoms}&nbsp;&nbsp;
-                        <strong>Best RMSD:</strong> {threeDData.rmsd != null ? `${threeDData.rmsd} Å` : "N/A"}
-                      </Typography>
                       <FormControlLabel
                         control={
                           <Switch size="small" checked={showInputMol3d}
@@ -2639,10 +2869,19 @@ function App() {
                           <Typography variant="caption" color="text.secondary">{sideBySideDist} Å</Typography>
                         </Box>
                       )}
+                      <Box sx={{ ml: "auto" }}>
+                        <IconButton
+                          size="small"
+                          onClick={() => setViewer3dFullscreen(true)}
+                          title="Expand to full screen"
+                        >
+                          <FullscreenIcon fontSize="small" />
+                        </IconButton>
+                      </Box>
                     </Box>
                   )}
-                  {threeDLoading && (
-                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 2 }}>
+                  {threeDLoadingIdx !== null && (
+                    <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 1 }}>
                       <CircularProgress size={20} />
                       <Typography variant="body2" color="text.secondary">
                         Generating 3D conformers and aligning…
@@ -2650,22 +2889,54 @@ function App() {
                     </Box>
                   )}
                   {threeDError && <Alert severity="error">{threeDError}</Alert>}
-                  {!threeDLoading && threeDData && (
+                  {!threeDViewerHtml && threeDLoadingIdx === null && !threeDError && (
+                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flex: 1, color: "text.secondary" }}>
+                      <Typography variant="body2">← Click molecules from the list to view their 3D structures</Typography>
+                    </Box>
+                  )}
+                  {threeDViewerHtml && (
                     <iframe
                       srcDoc={threeDViewerHtml}
                       style={{ width: "100%", flex: 1, border: "none", borderRadius: 8 }}
                       title="3D Ligand Comparison Viewer"
                     />
                   )}
-                  {!threeDLoading && !threeDData && !threeDError && (
-                    <Box sx={{ display: "flex", alignItems: "center", justifyContent: "center", flex: 1, color: "text.secondary" }}>
-                      <Typography variant="body2">← Select a molecule from the list to view its 3D structure</Typography>
-                    </Box>
-                  )}
                 </Box>
               </Box>
             </AccordionDetails>
           </Accordion>
+
+          {/* Fullscreen overlay for 3D viewer */}
+          {viewer3dFullscreen && threeDViewerHtml && (
+            <Box
+              sx={{
+                position: "fixed",
+                top: 0, left: 0, right: 0, bottom: 0,
+                zIndex: 1400,
+                bgcolor: "background.paper",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <Box sx={{ display: "flex", alignItems: "center", px: 2, py: 1, borderBottom: 1, borderColor: "divider", gap: 1, flexShrink: 0 }}>
+                <BiotechIcon fontSize="small" color="primary" />
+                <Typography fontWeight={600} sx={{ flex: 1 }}>3D Ligand — Full Screen</Typography>
+                <IconButton
+                  size="small"
+                  onClick={() => setViewer3dFullscreen(false)}
+                  title="Exit full screen"
+                >
+                  <FullscreenExitIcon />
+                </IconButton>
+              </Box>
+              <iframe
+                srcDoc={threeDViewerHtml}
+                style={{ width: "100%", flex: 1, border: "none" }}
+                title="3D Ligand Comparison Viewer (Full Screen)"
+              />
+            </Box>
+          )}
+          </>
         )}
 
         {/* ---- Protein-Ligand Alignment ---- */}
