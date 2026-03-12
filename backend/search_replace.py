@@ -327,7 +327,9 @@ def reassemble_from_smiles(smiles_list: List[str]) -> Chem.Mol | None:
 # ---------------------------------------------------------------------------
 
 def mol_to_base64_png(mol, size=(300, 300)):
-    img = Draw.MolToImage(mol, size=size)
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode()
+    from rdkit.Chem.Draw import rdMolDraw2D
+    drawer = rdMolDraw2D.MolDraw2DCairo(size[0], size[1])
+    drawer.drawOptions().bondLineWidth = 2.2 #adjust line thickness here
+    drawer.DrawMolecule(mol)
+    drawer.FinishDrawing()
+    return base64.b64encode(drawer.GetDrawingText()).decode()

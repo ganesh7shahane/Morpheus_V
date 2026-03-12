@@ -328,9 +328,10 @@ def screen_molecule(mol) -> list[str]:
 
 
 def _make_highlight_image(mol, new_frag_wildcard_smiles: str) -> str:
-    """Return a base64 PNG of *mol* with the new-fragment atoms/bonds highlighted
-    in magenta.  Wildcard attachment-point atoms ([*:N]) are excluded so only
-    genuine fragment heavy atoms are coloured."""
+    """Return a base64 PNG of *mol* with the new-fragment carbon atoms
+    and bonds coloured in magenta using direct atom-colour painting
+    (mirrors updateAtomPalette({6: MAGENTA}) from the notebook),
+    without any highlight halo/circle effects."""
     import re as _re
     try:
         from rdkit.Chem.Draw import rdMolDraw2D
@@ -343,24 +344,38 @@ def _make_highlight_image(mol, new_frag_wildcard_smiles: str) -> str:
         if not matches:
             return sr_mol_to_png(mol, size=(600, 600))
         match = matches[0]
-        # Query atoms with atomic num 0 are the wildcards — they map to scaffold
-        # attachment atoms, not new-fragment atoms, so exclude them.
+        # Query atoms with atomic num 0 are wildcards (attachment points) — exclude them.
         wildcard_q_idx = {i for i, a in enumerate(query.GetAtoms()) if a.GetAtomicNum() == 0}
-        hl_atoms = [match[i] for i in range(len(match)) if i not in wildcard_q_idx]
-        if not hl_atoms:
+        hl_all_atoms = [match[i] for i in range(len(match)) if i not in wildcard_q_idx]
+        if not hl_all_atoms:
             return sr_mol_to_png(mol, size=(600, 600))
-        hl_set = set(hl_atoms)
+        # Colour only carbon atoms in the fragment (atomic num 6), mirroring
+        # opts.updateAtomPalette({6: MAGENTA}) from the notebook.
+        magenta = (1.0, 0.0, 1.0)
+        hl_carbon_set = {idx for idx in hl_all_atoms
+                         if mol.GetAtomWithIdx(idx).GetAtomicNum() == 6}
+        hl_carbon_atoms = list(hl_carbon_set)
+        # Only colour C-C bonds; bonds touching a heteroatom keep their default colour
+        # so that N (blue), O (red), S (yellow) are not affected.
         hl_bonds = [
             b.GetIdx() for b in mol.GetBonds()
-            if b.GetBeginAtomIdx() in hl_set and b.GetEndAtomIdx() in hl_set
+            if b.GetBeginAtomIdx() in hl_carbon_set and b.GetEndAtomIdx() in hl_carbon_set
         ]
-        magenta = (0.25, 0.85, 0.25)
-        atom_colors = {idx: magenta for idx in hl_atoms}
+        atom_colors = {idx: magenta for idx in hl_carbon_atoms}
         bond_colors = {idx: magenta for idx in hl_bonds}
         drawer = rdMolDraw2D.MolDraw2DCairo(600, 600)
+        opts = drawer.drawOptions()
+        # Disable every source of halo/glow:
+        opts.fillHighlights = False          # no filled disc behind atoms/bonds
+        opts.continuousHighlight = False     # no thick continuous band along bond
+        opts.circleAtoms = False             # no circle ring around atoms
+        opts.atomHighlightsAreCircles = False
+        opts.highlightBondWidthMultiplier = 15  # int required; value of 1 = normal bond width (default=8×)
+        opts.bondLineWidth = 2.2               # slightly bolder bonds in the fragment (default 2.0)
+        opts.highlightRadius = 0.01            # atom highlight radius → effectively invisible
         rdMolDraw2D.PrepareAndDrawMolecule(
             drawer, mol,
-            highlightAtoms=hl_atoms,
+            highlightAtoms=hl_carbon_atoms,
             highlightBonds=hl_bonds,
             highlightAtomColors=atom_colors,
             highlightBondColors=bond_colors,

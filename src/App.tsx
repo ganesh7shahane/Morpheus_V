@@ -83,6 +83,7 @@ const EXAMPLE_MOLECULES: Record<string, string> = {
   Imatinib:
     "CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CN=CC=C5",
   Rofecoxib: "CS(=O)(=O)C1=CC=C(C2=C(C3=CC=CC=C3)C(=O)OC2)C=C1",
+  Tofacitinib: "C[C@@H]1CCN(C[C@@H]1N(C)C2=NC=NC3=C2C=CN3)C(=O)CC#N",
   Gefitinib: "COc1cc2ncnc(c2cc1OCCCN1CCOCC1)Nc1ccc(c(c1)Cl)F",
   Ibrutinib:
     "C=CC(=O)N1CCC[C@H](C1)N2C3=NC=NC(=C3C(=N2)C4=CC=C(C=C4)OC5=CC=CC=C5)N",
@@ -243,12 +244,10 @@ interface ThreeDCompareData {
   rmsd: number | null;
 }
 
-// Descriptors shown in parallel coordinates (order = axis order)
 // ---------------------------------------------------------------------------
 // Client-side fragment highlight recolouring helpers
-// The backend renders image_highlighted using green (R=0.25,G=0.85,B=0.25)
-// which maps to hue ~120°.  These helpers let the user swap that hue to any
-// colour they choose, entirely in the browser via Canvas pixel manipulation.
+// The backend renders fragment carbons/bonds in magenta (R=1,G=0,B=1 → hue 300°).
+// These helpers let the user recolour to any chosen hex via Canvas pixel manipulation.
 // ---------------------------------------------------------------------------
 function _hexToRgb(hex: string): [number, number, number] {
   const c = hex.replace("#", "");
@@ -278,7 +277,7 @@ function _hslToRgb(h: number, s: number, l: number): [number, number, number] {
   };
   return [Math.round(hue2(h+1/3)*255), Math.round(hue2(h)*255), Math.round(hue2(h-1/3)*255)];
 }
-/** Replace pixels near the backend's green hue (120°) with the target colour. */
+/** Replace pixels near magenta hue (300°) with the user-chosen target colour. */
 function recolorHighlightImage(base64: string, targetHex: string): Promise<string> {
   const [tr, tg, tb] = _hexToRgb(targetHex);
   const [targetH, targetS] = _rgbToHsl(tr, tg, tb);
@@ -293,8 +292,9 @@ function recolorHighlightImage(base64: string, targetHex: string): Promise<strin
       const d = id.data;
       for (let i = 0; i < d.length; i += 4) {
         const [h, s, l] = _rgbToHsl(d[i], d[i+1], d[i+2]);
-        if (s > 0.22) {
-          let diff = Math.abs(h - 120);
+        if (s > 0.3) {
+          // Find pixels near magenta hue (300°), allowing ±45°
+          let diff = Math.abs(h - 300);
           if (diff > 180) diff = 360 - diff;
           if (diff < 45) {
             const [nr, ng, nb] = _hslToRgb(targetH, Math.max(s, targetS * 0.8), l);
@@ -303,14 +303,15 @@ function recolorHighlightImage(base64: string, targetHex: string): Promise<strin
         }
       }
       ctx.putImageData(id, 0, 0);
-      // strip the "data:image/png;base64," prefix
       resolve(canvas.toDataURL("image/png").split(",")[1]);
     };
-    img.onerror = () => resolve(base64); // fallback: return original
+    img.onerror = () => resolve(base64);
     img.src = `data:image/png;base64,${base64}`;
   });
 }
-const _DEFAULT_HIGHLIGHT_COLOR = "#40d940";
+const _DEFAULT_HIGHLIGHT_COLOR = "#ff00ff"; // magenta — matches backend
+
+// Descriptors shown in parallel coordinates (order = axis order)
 
 const DESCRIPTOR_KEYS: { key: string; label: string }[] = [
   { key: "mscore", label: "MScore" },
@@ -845,7 +846,6 @@ function App() {
   }, []);
 
   // Recolour fragment-highlight images whenever colour or molecule list changes
-  // Debounce the colour so we don't reprocess 200 images on every picker drag event.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedHighlightColor(highlightColor), 150);
     return () => clearTimeout(t);
@@ -857,8 +857,7 @@ function App() {
       return;
     }
     if (debouncedHighlightColor.toLowerCase() === _DEFAULT_HIGHLIGHT_COLOR) {
-      // Default colour — use backend images as-is
-      setRecoloredImages(new Map());
+      setRecoloredImages(new Map()); // use backend images as-is
       return;
     }
     let cancelled = false;
@@ -2189,45 +2188,15 @@ function App() {
                       {showFragHighlight && (
                         <Tooltip title="Pick highlight colour">
                           <Box
-                            sx={{
-                              position: "relative",
-                              width: 20,
-                              height: 20,
-                              flexShrink: 0,
-                              ml: 0.25,
-                              cursor: "pointer",
-                            }}
+                            sx={{ position: "relative", width: 20, height: 20, flexShrink: 0, ml: 0.25, cursor: "pointer" }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {/* Visible swatch */}
-                            <Box
-                              sx={{
-                                width: 18,
-                                height: 18,
-                                borderRadius: "50%",
-                                bgcolor: highlightColor,
-                                border: "2px solid",
-                                borderColor: "divider",
-                                boxShadow: 1,
-                                pointerEvents: "none",
-                              }}
-                            />
-                            {/* Transparent native colour-picker input overlaid on the swatch */}
+                            <Box sx={{ width: 18, height: 18, borderRadius: "50%", bgcolor: highlightColor, border: "2px solid", borderColor: "divider", boxShadow: 1, pointerEvents: "none" }} />
                             <input
                               type="color"
                               value={highlightColor}
                               onChange={(e) => setHighlightColor(e.target.value)}
-                              style={{
-                                position: "absolute",
-                                top: 0,
-                                left: 0,
-                                width: "100%",
-                                height: "100%",
-                                opacity: 0,
-                                cursor: "pointer",
-                                border: "none",
-                                padding: 0,
-                              }}
+                              style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer", border: "none", padding: 0 }}
                             />
                           </Box>
                         </Tooltip>
